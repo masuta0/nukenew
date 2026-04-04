@@ -1,350 +1,259 @@
-// utils/music.js
-// yt-dlp が存在しない場合は spawn を回避し、ytdl-core にフォールバックする安全実装
+// utils/music.js  ── 修正版
+// play-dl を使用（ytdl-core はYouTubeのbot検出で使用不可のため）
 
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, StreamType } = require('@discordjs/voice');
-const { spawn, spawnSync } = require('child_process');
-const stream = require('stream');
-const ffmpegPath = require('ffmpeg-static');
-const fs = require('fs');
+const {
+joinVoiceChannel,
+createAudioPlayer,
+createAudioResource,
+AudioPlayerStatus,
+StreamType,
+VoiceConnectionStatus,
+entersState,
+} = require(’@discordjs/voice’);
+const { spawn, spawnSync } = require(‘child_process’);
+const ffmpegPath = require(‘ffmpeg-static’);
+const fs = require(‘fs’);
 
-let ytdl;
-try { ytdl = require('ytdl-core'); } catch (e) { ytdl = null; }
+// play-dl（YouTube対応・bot検出回避）
+let playdl;
+try {
+playdl = require(‘play-dl’);
+} catch (e) {
+console.warn(‘play-dl が見つかりません:’, e.message);
+playdl = null;
+}
 
 const connections = new Map();
-const players = new Map();
-const queues = new Map();
+const players    = new Map();
+const queues     = new Map();
 
-const delay = ms => new Promise(r => setTimeout(r, ms));
-
-// --- yt-dlp の存在チェック ---
+// ── yt-dlp の存在チェック（Renderでは基本なし） ──
 function isYtDlpAvailable() {
-  try {
-    // try which
-    const which = spawnSync('which', ['yt-dlp'], { encoding: 'utf8' });
-    if (which.status === 0 && which.stdout && which.stdout.trim()) return true;
-  } catch (_) {}
-  // check common install paths
-  const candidates = ['/usr/local/bin/yt-dlp', '/usr/bin/yt-dlp', '/root/.local/bin/yt-dlp'];
-  for (const p of candidates) {
-    try {
-      if (fs.existsSync(p)) return true;
-    } catch (_) {}
-  }
-  return false;
+try {
+const which = spawnSync(‘which’, [‘yt-dlp’], { encoding: ‘utf8’ });
+if (which.status === 0 && which.stdout?.trim()) return true;
+} catch (*) {}
+for (const p of [’/usr/local/bin/yt-dlp’, ‘/usr/bin/yt-dlp’, ‘/root/.local/bin/yt-dlp’]) {
+try { if (fs.existsSync(p)) return true; } catch (*) {}
 }
-
+return false;
+}
 const hasYtDlp = isYtDlpAvailable();
 
-// safe spawn wrapper for yt-dlp: returns stdout stream or null
 function spawnYtdlpStream(url) {
-  if (!hasYtDlp) {
-    console.warn('yt-dlp not available on PATH; skipping spawn');
-    return null;
-  }
-  try {
-    const cp = spawn('yt-dlp', ['-f', 'bestaudio', '-o', '-', url], { stdio: ['ignore', 'pipe', 'pipe'] });
-    // attach error handler so process 'error' doesn't bubble unhandled
-    cp.on('error', err => {
-      console.error('yt-dlp spawn error (handled):', err?.code || err?.message || err);
-    });
-    return cp.stdout;
-  } catch (err) {
-    console.error('spawnYtdlpStream failed:', err);
-    return null;
-  }
+if (!hasYtDlp) return null;
+try {
+const cp = spawn(‘yt-dlp’, [’-f’, ‘bestaudio’, ‘-o’, ‘-’, url], {
+stdio: [‘ignore’, ‘pipe’, ‘pipe’],
+});
+cp.on(‘error’, err => console.error(‘yt-dlp spawn error:’, err?.code || err?.message));
+return cp.stdout;
+} catch (err) {
+console.error(‘spawnYtdlpStream failed:’, err);
+return null;
+}
 }
 
-// ffmpeg helper: convert input stream to raw pcm for Discord
-function spawnFfmpegForStream(inputStream) {
-  try {
-    const args = ['-i', 'pipe:0', '-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:1'];
-    const ff = spawn(ffmpegPath, args, { stdio: ['pipe', 'pipe', 'ignore'] });
-    ff.on('error', e => console.error('ffmpeg spawn error:', e));
-    if (inputStream && typeof inputStream.pipe === 'function') inputStream.pipe(ff.stdin);
-    return ff.stdout;
-  } catch (e) {
-    console.error('spawnFfmpegForStream error:', e);
-    return null;
-  }
-}
-
-// joinVoice expects VoiceChannel
 async function joinVoice(channel) {
-  if (!channel || !channel.guild) throw new Error('Voice channel is required');
-  const guildId = channel.guild.id;
-  if (!connections.has(guildId)) {
-    const connection = joinVoiceChannel({
-      channelId: channel.id,
-      guildId: channel.guild.id,
-      adapterCreator: channel.guild.voiceAdapterCreator,
-    });
-    connections.set(guildId, connection);
-  }
-  return connections.get(guildId);
+if (!channel?.guild) throw new Error(‘Voice channel is required’);
+const guildId = channel.guild.id;
+if (!connections.has(guildId)) {
+const connection = joinVoiceChannel({
+channelId:       channel.id,
+guildId:         channel.guild.id,
+adapterCreator:  channel.guild.voiceAdapterCreator,
+});
+// 接続失敗時のエラーハンドラ
+connection.on(‘error’, err => console.error(‘Voice connection error:’, err));
+connections.set(guildId, connection);
+}
+return connections.get(guildId);
 }
 
 async function leaveVoice(guildOrChannel) {
-  const guildId = typeof guildOrChannel === 'string' ? guildOrChannel : (guildOrChannel?.guild?.id);
-  if (!guildId) return false;
-  const conn = connections.get(guildId);
-  if (conn) try { conn.destroy(); } catch {}
-  connections.delete(guildId);
-  const player = players.get(guildId);
-  if (player) try { player.stop(); } catch {}
-  players.delete(guildId);
-  queues.delete(guildId);
-  return true;
+const guildId = typeof guildOrChannel === ‘string’
+? guildOrChannel
+: guildOrChannel?.guild?.id;
+if (!guildId) return false;
+const conn = connections.get(guildId);
+if (conn) try { conn.destroy(); } catch {}
+connections.delete(guildId);
+const player = players.get(guildId);
+if (player) try { player.stop(); } catch {}
+players.delete(guildId);
+queues.delete(guildId);
+return true;
+}
+
+async function send(textChannel, text) {
+if (!textChannel?.send) return null;
+return textChannel.send(text).catch(() => null);
 }
 
 async function playNext(guildId, textChannel, voiceChannel) {
-  const queue = queues.get(guildId);
-  if (!queue || queue.length === 0) return;
-  const item = queue.shift();
-  const { url, title, isYouTube, isAttachment } = item;
+const queue = queues.get(guildId);
+if (!queue || queue.length === 0) return;
+const { url, title, isYouTube, isAttachment } = queue.shift();
 
-  try {
-    let resource = null;
+try {
+let resource = null;
 
-    if (isYouTube) {
-      // 1) try yt-dlp spawn + ffmpeg
-      const ytdlpStdout = spawnYtdlpStream(url);
-      if (ytdlpStdout) {
-        const ffout = spawnFfmpegForStream(ytdlpStdout);
-        if (!ffout) throw new Error('ffmpeg failed for yt-dlp stream');
-        resource = createAudioResource(ffout, { inputType: StreamType.Raw });
-      } else if (ytdl) {
-        // 2) fallback to ytdl-core + ffmpeg
-        try {
-          let ytdlStream;
-          let streamErrorOccurred = false;
+```
+if (isYouTube) {
+  // ── 優先順: yt-dlp → play-dl ──
+  const ytdlpStream = spawnYtdlpStream(url);
+  if (ytdlpStream) {
+    // yt-dlp が使える環境（Dockerビルドなど）
+    const ff = spawn(ffmpegPath, [
+      '-i', 'pipe:0', '-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:1'
+    ], { stdio: ['pipe', 'pipe', 'ignore'] });
+    ff.on('error', e => console.error('ffmpeg error:', e));
+    ytdlpStream.pipe(ff.stdin);
+    resource = createAudioResource(ff.stdout, { inputType: StreamType.Raw });
 
-          // 先にタイトルだけ取得を試みる（失敗したらスキップ）
-          let videoInfo = null;
-          try {
-            videoInfo = await ytdl.getInfo(url);
-          } catch (infoErr) {
-            console.error('ytdl.getInfo failed:', infoErr);
-            const statusCode = infoErr?.statusCode || infoErr?.status || null;
-
-            if (statusCode === 410) {
-              if (textChannel && typeof textChannel.send === 'function') {
-                const msg = await textChannel.send('❌ この動画は利用できません（削除済みまたはアクセス不可）').catch(()=>null);
-                if (msg && msg.deletable) {
-                  setTimeout(() => msg.delete().catch(()=>{}), 30000);
-                }
-              }
-            } else if (statusCode === 403) {
-              if (textChannel && typeof textChannel.send === 'function') {
-                const msg = await textChannel.send('❌ この動画へのアクセスが拒否されました').catch(()=>null);
-                if (msg && msg.deletable) {
-                  setTimeout(() => msg.delete().catch(()=>{}), 30000);
-                }
-              }
-            } else {
-              if (textChannel && typeof textChannel.send === 'function') {
-                const msg = await textChannel.send(`❌ 動画情報の取得に失敗しました`).catch(()=>null);
-                if (msg && msg.deletable) {
-                  setTimeout(() => msg.delete().catch(()=>{}), 30000);
-                }
-              }
-            }
-
-            // 次の曲へ
-            setTimeout(() => playNext(guildId, textChannel, voiceChannel), 500);
-            return;
-          }
-
-          if (!videoInfo || !videoInfo.videoDetails) {
-            if (textChannel && typeof textChannel.send === 'function') {
-              const msg = await textChannel.send('❌ 動画情報が取得できませんでした').catch(()=>null);
-              if (msg && msg.deletable) {
-                setTimeout(() => msg.delete().catch(()=>{}), 30000);
-              }
-            }
-            setTimeout(() => playNext(guildId, textChannel, voiceChannel), 500);
-            return;
-          }
-
-          ytdlStream = ytdl(url, { 
-            filter: 'audioonly', 
-            highWaterMark: 1 << 25,
-            quality: 'highestaudio'
-          });
-
-          ytdlStream.on('error', (err) => {
-            if (streamErrorOccurred) return;
-            streamErrorOccurred = true;
-
-            console.error('ytdl stream error:', err);
-            const statusCode = err?.statusCode || err?.status || null;
-
-            if (textChannel && typeof textChannel.send === 'function') {
-              let errorMsg = '❌ 再生エラーが発生しました';
-              if (statusCode === 410) {
-                errorMsg = '❌ この動画は利用できません';
-              } else if (statusCode === 403) {
-                errorMsg = '❌ この動画へのアクセスが拒否されました';
-              }
-
-              textChannel.send(errorMsg).then(msg => {
-                if (msg && msg.deletable) {
-                  setTimeout(() => msg.delete().catch(()=>{}), 30000);
-                }
-              }).catch(()=>{});
-            }
-
-            setTimeout(() => playNext(guildId, textChannel, voiceChannel), 500);
-          });
-
-          const ffout = spawnFfmpegForStream(ytdlStream);
-          if (!ffout) throw new Error('ffmpeg failed for ytdl-core stream');
-          resource = createAudioResource(ffout, { inputType: StreamType.Raw });
-
-        } catch (yerr) {
-          console.error('ytdl fallback failed:', yerr);
-          if (textChannel && typeof textChannel.send === 'function') {
-            const msg = await textChannel.send(`❌ 再生に失敗しました: ${yerr.message || String(yerr)}`).catch(()=>null);
-            if (msg && msg.deletable) {
-              setTimeout(() => msg.delete().catch(()=>{}), 30000);
-            }
-          }
-          setTimeout(() => playNext(guildId, textChannel, voiceChannel), 500);
-          return;
-        }
-      } else {
-        throw new Error('再生に必要な yt-dlp または ytdl-core が見つかりません。');
-      }
-    } else if (isAttachment) {
-      // attachment URL -> use ffmpeg directly (ffmpeg reads URL)
-      const ff = spawn(ffmpegPath, ['-i', url, '-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:1'], { stdio: ['ignore', 'pipe', 'ignore'] });
-      ff.on('error', e => console.error('ffmpeg spawn error:', e));
-      resource = createAudioResource(ff.stdout, { inputType: StreamType.Raw });
-    } else {
-      resource = createAudioResource(url);
+  } else if (playdl) {
+    // ── play-dl による再生（Renderなどyt-dlpなし環境） ──
+    try {
+      // play-dl はストリームを直接返せる
+      const stream = await playdl.stream(url, { quality: 2 });
+      resource = createAudioResource(stream.stream, {
+        inputType: stream.type,
+      });
+    } catch (pdErr) {
+      console.error('play-dl stream error:', pdErr);
+      const msg = pdErr.message || String(pdErr);
+      await send(textChannel, `❌ 再生に失敗しました: ${msg}`);
+      setTimeout(() => playNext(guildId, textChannel, voiceChannel), 500);
+      return;
     }
 
-    const player = createAudioPlayer();
-    player.play(resource);
-    player.on('error', err => {
-      console.error('Audio player error:', err);
-      if (textChannel && typeof textChannel.send === 'function') {
-        textChannel.send(`❌ プレイヤーエラーが発生しました`).then(msg => {
-          if (msg && msg.deletable) {
-            setTimeout(() => msg.delete().catch(()=>{}), 30000);
-          }
-        }).catch(()=>{});
-      }
-      setTimeout(() => playNext(guildId, textChannel, voiceChannel), 1000);
-    });
-    player.on(AudioPlayerStatus.Idle, () => {
-      setTimeout(() => playNext(guildId, textChannel, voiceChannel), 250);
-    });
-
-    const conn = connections.get(guildId);
-    if (!conn && voiceChannel) await joinVoice(voiceChannel);
-    const connection = connections.get(guildId);
-    if (connection) connection.subscribe(player);
-    players.set(guildId, player);
-
-    if (textChannel && typeof textChannel.send === 'function') {
-      const msg = await textChannel.send(`🎵 再生開始: **${title || '不明なタイトル'}**`).catch(()=>null);
-      if (msg && msg.deletable) {
-        setTimeout(() => msg.delete().catch(()=>{}), 30000);
-      }
-    }
-  } catch (err) {
-    console.error('再生エラー:', err);
-    if (textChannel && typeof textChannel.send === 'function') {
-      const msg = await textChannel.send(`❌ 再生できませんでした: **${title || '不明なタイトル'}**\n理由: ${err.message || err}`).catch(()=>null);
-      if (msg && msg.deletable) {
-        setTimeout(() => msg.delete().catch(()=>{}), 30000);
-      }
-    }
-    setTimeout(() => playNext(guildId, textChannel, voiceChannel), 1000);
+  } else {
+    await send(textChannel, '❌ 再生エンジンが見つかりません（play-dl / yt-dlp が必要です）');
+    setTimeout(() => playNext(guildId, textChannel, voiceChannel), 500);
+    return;
   }
+
+} else if (isAttachment) {
+  // 添付ファイル → ffmpeg で直接読み込み
+  const ff = spawn(ffmpegPath, [
+    '-i', url, '-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:1'
+  ], { stdio: ['ignore', 'pipe', 'ignore'] });
+  ff.on('error', e => console.error('ffmpeg error:', e));
+  resource = createAudioResource(ff.stdout, { inputType: StreamType.Raw });
+
+} else {
+  resource = createAudioResource(url);
+}
+
+const player = createAudioPlayer();
+player.on('error', async err => {
+  console.error('Audio player error:', err);
+  await send(textChannel, `❌ プレイヤーエラー: ${err.message}`);
+  setTimeout(() => playNext(guildId, textChannel, voiceChannel), 1000);
+});
+player.on(AudioPlayerStatus.Idle, () => {
+  setTimeout(() => playNext(guildId, textChannel, voiceChannel), 250);
+});
+
+// VC接続を確認してSubscribe
+if (!connections.has(guildId) && voiceChannel) await joinVoice(voiceChannel);
+const connection = connections.get(guildId);
+if (connection) connection.subscribe(player);
+players.set(guildId, player);
+player.play(resource);
+
+// 再生開始メッセージ（30秒後に自動削除）
+const msg = await send(textChannel, `🎵 再生開始: **${title || '不明'}**`);
+if (msg?.deletable) setTimeout(() => msg.delete().catch(() => {}), 30000);
+```
+
+} catch (err) {
+console.error(‘playNext error:’, err);
+const msg = await send(textChannel, `❌ 再生できませんでした: **${title || '不明'}**\n${err.message}`);
+if (msg?.deletable) setTimeout(() => msg.delete().catch(() => {}), 30000);
+setTimeout(() => playNext(guildId, textChannel, voiceChannel), 1000);
+}
 }
 
 async function playYouTube(channel, url, textChannel) {
-  if (!channel) throw new Error('Voice channel is required');
-  const guildId = channel.guild.id;
-  await joinVoice(channel);
+if (!channel) throw new Error(‘Voice channel is required’);
+const guildId = channel.guild.id;
+await joinVoice(channel);
 
-  let title = '不明なタイトル';
-  try {
-    if (hasYtDlp) {
-      const p = spawnSync('yt-dlp', ['--get-title', '--no-warnings', url], { encoding: 'utf8', timeout: 5000 });
-      if (p.status === 0 && p.stdout) title = p.stdout.trim();
-    } else if (ytdl) {
-      try {
-        const info = await ytdl.getInfo(url).catch(()=>null);
-        if (info && info.videoDetails && info.videoDetails.title) {
-          title = info.videoDetails.title;
-        }
-      } catch (e) {
-        console.warn('タイトル取得失敗:', e.message);
-      }
-    }
-  } catch (e) {
-    console.warn('タイトル取得でエラー:', e);
-  }
+// タイトル取得
+let title = url; // フォールバックはURLそのまま
+try {
+if (hasYtDlp) {
+const p = spawnSync(‘yt-dlp’, [’–get-title’, ‘–no-warnings’, url], {
+encoding: ‘utf8’, timeout: 5000,
+});
+if (p.status === 0 && p.stdout) title = p.stdout.trim();
+} else if (playdl) {
+const info = await playdl.video_info(url).catch(() => null);
+if (info?.video_details?.title) title = info.video_details.title;
+}
+} catch (e) {
+console.warn(‘タイトル取得失敗:’, e.message);
+}
 
-  if (!queues.has(guildId)) queues.set(guildId, []);
-  queues.get(guildId).push({ url, title, isYouTube: true, isAttachment: false });
-  const isPlaying = players.get(guildId)?.state?.status === AudioPlayerStatus.Playing;
-  if (!isPlaying) playNext(guildId, textChannel, channel);
-  else if (textChannel && typeof textChannel.send === 'function') {
-    const msg = await textChannel.send(`▶️ キューに追加: **${title}**`).catch(()=>null);
-    if (msg && msg.deletable) {
-      setTimeout(() => msg.delete().catch(()=>{}), 30000);
-    }
-  }
-  return title;
+if (!queues.has(guildId)) queues.set(guildId, []);
+queues.get(guildId).push({ url, title, isYouTube: true, isAttachment: false });
+
+const isPlaying = players.get(guildId)?.state?.status === AudioPlayerStatus.Playing;
+if (!isPlaying) {
+playNext(guildId, textChannel, channel);
+} else {
+const msg = await send(textChannel, `▶️ キューに追加: **${title}**`);
+if (msg?.deletable) setTimeout(() => msg.delete().catch(() => {}), 30000);
+}
+return title;
 }
 
 async function playAttachment(channel, attachmentUrl, filename, textChannel) {
-  if (!channel) throw new Error('Voice channel is required');
-  const guildId = channel.guild.id;
-  await joinVoice(channel);
-  if (!queues.has(guildId)) queues.set(guildId, []);
-  queues.get(guildId).push({ url: attachmentUrl, title: filename, isYouTube: false, isAttachment: true });
-  const isPlaying = players.get(guildId)?.state?.status === AudioPlayerStatus.Playing;
-  if (!isPlaying) playNext(guildId, textChannel, channel);
-  else if (textChannel && typeof textChannel.send === 'function') {
-    const msg = await textChannel.send(`▶️ キューに追加: **${filename}**`).catch(()=>null);
-    if (msg && msg.deletable) {
-      setTimeout(() => msg.delete().catch(()=>{}), 30000);
-    }
-  }
-  return filename;
+if (!channel) throw new Error(‘Voice channel is required’);
+const guildId = channel.guild.id;
+await joinVoice(channel);
+if (!queues.has(guildId)) queues.set(guildId, []);
+queues.get(guildId).push({ url: attachmentUrl, title: filename, isYouTube: false, isAttachment: true });
+
+const isPlaying = players.get(guildId)?.state?.status === AudioPlayerStatus.Playing;
+if (!isPlaying) {
+playNext(guildId, textChannel, channel);
+} else {
+const msg = await send(textChannel, `▶️ キューに追加: **${filename}**`);
+if (msg?.deletable) setTimeout(() => msg.delete().catch(() => {}), 30000);
+}
+return filename;
 }
 
-// public play: accepts (VoiceChannel, url, textChannel)
 async function play(channel, url, textChannel, attachmentFilename = null) {
-  if (!channel || !channel.guild) throw new Error('Voice channel is required');
-  if (attachmentFilename) return playAttachment(channel, url, attachmentFilename, textChannel);
-  if (typeof url === 'string' && (url.includes('youtube.com') || url.includes('youtu.be'))) return playYouTube(channel, url, textChannel);
-  return playAttachment(channel, url, url.split('/').pop(), textChannel);
+if (!channel?.guild) throw new Error(‘Voice channel is required’);
+if (attachmentFilename) return playAttachment(channel, url, attachmentFilename, textChannel);
+if (typeof url === ‘string’ && (url.includes(‘youtube.com’) || url.includes(‘youtu.be’))) {
+return playYouTube(channel, url, textChannel);
+}
+return playAttachment(channel, url, url.split(’/’).pop(), textChannel);
 }
 
 function stop(guildOrChannel) {
-  const guildId = typeof guildOrChannel === 'string' ? guildOrChannel : (guildOrChannel?.guild?.id);
-  const player = players.get(guildId);
-  if (!player) return false;
-  queues.set(guildId, []);
-  try { player.stop(); } catch (e) { console.error('stop error:', e); }
-  return true;
+const guildId = typeof guildOrChannel === ‘string’
+? guildOrChannel
+: guildOrChannel?.guild?.id;
+const player = players.get(guildId);
+if (!player) return false;
+queues.set(guildId, []);
+try { player.stop(); } catch (e) { console.error(‘stop error:’, e); }
+return true;
 }
 
 module.exports = {
-  joinVoice,
-  leaveVoice,
-  play,
-  stop,
-  // compatibility aliases
-  playUrl: async (...args) => play(...args),
-  stopMusic: stop,
-  players,
-  queues,
-  // expose detection for debugging
-  _hasYtDlp: hasYtDlp
+joinVoice,
+leaveVoice,
+play,
+stop,
+playUrl: async (…args) => play(…args),
+stopMusic: stop,
+players,
+queues,
+_hasYtDlp: hasYtDlp,
 };
