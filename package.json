@@ -1,0 +1,58 @@
+{
+  "name": "discord-all-in-one-bot",
+  "version": "1.0.0",
+  "description": "All-in-one Discord bot with AI, music (YouTube/attachment), quizzes, backup/restore, and more.",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js",
+    "weekly": "node weeklyChannelManager.js",
+    "weekly:dev": "node -r dotenv/config weeklyChannelManager.js"
+  },
+  "engines": {
+    "node": "20.x"
+  },
+  "dependencies": {
+    "@discordjs/voice": "^0.19.0",
+    "@distube/ytdl-core": "^4.16.12",
+    "@google-cloud/translate": "^9.2.0",
+    "@google/generative-ai": "^0.21.0",
+    "@iamtraction/google-translate": "^2.0.1",
+    "@snazzah/davey": "^0.1.6",
+    "@tensorflow/tfjs": "^4.22.0",
+    "@tensorflow/tfjs-node": "^4.22.0",
+    "@vitalets/google-translate-api": "^9.2.1",
+    "@vladmandic/face-api": "^1.7.15",
+    "axios": "^1.11.0",
+    "canvas": "^3.2.0",
+    "cheerio": "^1.0.0-rc.12",
+    "discord.js": "^14.11.0",
+    "dotenv": "^16.3.1",
+    "dropbox": "^10.34.0",
+    "express": "^5.1.0",
+    "face-api.js": "^0.22.2",
+    "ffmpeg-static": "^5.2.0",
+    "googleapis": "^156.0.0",
+    "libsodium-wrappers": "^0.7.15",
+    "node-cron": "^4.2.1",
+    "node-fetch": "^2.6.7",
+    "open": "^10.2.0",
+    "opusscript": "^0.0.8",
+    "play-dl": "^1.9.7",
+    "puppeteer": "^24.19.0",
+    "twitter-api-v2": "^1.26.0",
+    "yt-search": "^2.10.6",
+    "ytdl-core": "^4.11.5"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/masuta0/nuke2.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/masuta0/nuke2/issues"
+  },
+  "homepage": "https://github.com/masuta0/nuke2#readme"
+}
