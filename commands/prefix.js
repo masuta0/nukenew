@@ -142,9 +142,7 @@ module.exports = async function handlePrefixMessage(client, msg) {
     }
 
     case "クイズ": {
-      const question = await quizManager.getQuestion();
-      const reply = await msg.reply(`クイズ: ${question.text}`);
-      if (reply) autoDeleteMessage(reply, AUTO_DELETE_SECONDS);
+      await quizManager(msg.channel, msg.author);
       break;
     }
 
