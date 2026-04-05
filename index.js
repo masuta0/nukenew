@@ -42,6 +42,16 @@ const {
   updateActiveRoles,
 } = require('./utils/activity');
 
+// === anti-raid 追加ハンドラのインポート ===
+const {
+  handleBotAdd,
+  handleGuildUpdate,
+  handleChannelCreate,
+  handleChannelUpdate,
+  handleRoleCreate,
+  handleRoleDelete,
+} = antiRaid;
+
 // === 設定 ===
 const ACTIVE_ROLE_ID = process.env.ACTIVE_ROLE_ID;
 const TOKEN = process.env.TOKEN;
@@ -236,5 +246,12 @@ client.on('guildBanAdd', onGuildBanAdd);
 client.on('roleUpdate', handleRoleUpdate);
 client.on('messageReactionAdd', handleReactionAdd);
 client.on('guildAuditLogEntryCreate', handleAuditLogEntry);
+// 追加イベントハンドラーの登録
+client.on('guildMemberAdd', handleBotAdd);
+client.on('guildUpdate', handleGuildUpdate);
+client.on('channelCreate', handleChannelCreate);
+client.on('channelUpdate', handleChannelUpdate);
+client.on('roleCreate', handleRoleCreate);
+client.on('roleDelete', handleRoleDelete);
 
 client.login(TOKEN);
