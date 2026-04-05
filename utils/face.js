@@ -25,13 +25,25 @@ async function initFaceRecognition() {
   console.log('⚡ 顔認識モデル読み込み完了');
 }
 
-// 顔登録（基準画像を読み込む、localPath はローカルファイルパス）
+// 顔登録（基準画像を読み込む。localPath はローカルファイルパスまたはURL）
 async function registerFace(localPath) {
-  if (!fs.existsSync(localPath)) {
-    throw new Error(`ファイルが見つかりません: ${localPath}`);
+  let buffer;
+
+  // URLの場合はfetchして取得
+  if (typeof localPath === 'string' && (localPath.startsWith('http://') || localPath.startsWith('https://'))) {
+    const res = await fetch(localPath);
+    if (!res.ok) {
+      throw new Error(`URL から画像を取得できませんでした: ${res.status}`);
+    }
+    buffer = await res.buffer();
+  } else {
+    if (!fs.existsSync(localPath)) {
+      throw new Error(`ファイルが見つかりません: ${localPath}`);
+    }
+    buffer = fs.readFileSync(localPath);
   }
 
-  const img = await canvas.loadImage(localPath);
+  const img = await canvas.loadImage(buffer);
   const detection = await faceapi
     .detectSingleFace(img)
     .withFaceLandmarks()
