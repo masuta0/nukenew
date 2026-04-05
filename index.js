@@ -42,7 +42,7 @@ const {
   updateActiveRoles,
 } = require('./utils/activity');
 
-// === 設定 (環境変数から読み込み) ===
+// === 設定 ===
 const ACTIVE_ROLE_ID = process.env.ACTIVE_ROLE_ID;
 const TOKEN = process.env.TOKEN;
 const PORT = process.env.PORT || 3000;
@@ -57,12 +57,8 @@ if (!TOKEN) {
 const APP_DATA_DIR = path.join(__dirname, 'app-data');
 if (!fs.existsSync(APP_DATA_DIR)) fs.mkdirSync(APP_DATA_DIR, { recursive: true });
 
-process.on('uncaughtException', (err) => {
-  console.error('🚨 uncaughtException:', err);
-});
-process.on('unhandledRejection', (reason) => {
-  console.error('🚨 unhandledRejection:', reason);
-});
+process.on('uncaughtException', (err) => { console.error('🚨 uncaughtException:', err); });
+process.on('unhandledRejection', (reason) => { console.error('🚨 unhandledRejection:', reason); });
 
 const client = new Client({
   intents: [
@@ -108,38 +104,37 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// === 【修正】 clientReady -> ready に変更 ===
+// === 【修正】 頑丈な ready イベント ===
 client.once('ready', async () => {
-  console.log('Logged in as ' + client.user.tag);
+  console.log('🚀 Bot logged in as ' + client.user.tag);
 
-  try {
-    await initFaceRecognition();
-    console.log('Face recognition initialized');
+  const initTasks = [
+    { name: 'Face Recognition', fn: async () => { await initFaceRecognition(); } },
+    { name: 'Default Face Registration', fn: async () => {
+        const localFacePath = path.join(__dirname, 'face.jpg');
+        if (fs.existsSync(localFacePath)) { await registerFace(localFacePath); } 
+        else { await registerFace('https://i.imgur.com/DkoHDM9.jpg'); }
+    }},
+    { name: 'Dropbox Storage', fn: async () => { await ensureDropboxInit(); } },
+    { name: 'Activity Data', fn: async () => { await loadActivity(); } },
+    { name: 'Level Data', fn: async () => { await loadLevelData(); } },
+    { name: 'Quiz Data', fn: async () => { preloadQuizzes(); } },
+    { name: 'Weekly Data', fn: async () => { await loadWeeklyData(); } },
+    { name: 'Verify Panel', fn: async () => { await verify.restoreVerifyMessage(client); } },
+    { name: 'Weekly Setup', fn: async () => { setupWeekly(client, WEEKLY_CHANNEL_ID); } },
+    { name: 'Slash Commands', fn: async () => { await registerSlashCommands(client); } },
+  ];
 
+  for (const task of initTasks) {
     try {
-      const localFacePath = path.join(__dirname, 'face.jpg');
-      if (fs.existsSync(localFacePath)) {
-        await registerFace(localFacePath);
-      } else {
-        await registerFace('https://i.imgur.com/DkoHDM9.jpg');
-      }
-    } catch (faceError) {
-      console.error('Face registration failed:', faceError.message);
+      await task.fn();
+      console.log(`✅ ${task.name} initialized`);
+    } catch (err) {
+      console.error(`❌ ${task.name} failed:`, err.message || err);
     }
-
-    await ensureDropboxInit();
-    await loadActivity();
-    await loadLevelData();
-    preloadQuizzes(); // これでクイズデータがロードされる
-    await loadWeeklyData();
-
-    await verify.restoreVerifyMessage(client);
-    setupWeekly(client, WEEKLY_CHANNEL_ID);
-    await registerSlashCommands(client);
-    console.log('✅ All systems initialized and Slash commands registered');
-  } catch (err) {
-    console.error('Ready event initialization error:', err);
   }
+
+  console.log('✨ Bot startup sequence completed.');
 
   setInterval(() => {
     for (const guildTracker of antiRaid.similarityTracker.values()) {
