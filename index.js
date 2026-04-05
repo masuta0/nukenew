@@ -47,24 +47,16 @@ const ACTIVE_ROLE_ID = process.env.ACTIVE_ROLE_ID;
 const TOKEN = process.env.TOKEN;
 const PORT = process.env.PORT || 3000;
 const WEEKLY_CHANNEL_ID = process.env.WEEKLY_CHANNEL_ID || null;
-const FACE_LOG_CHANNEL = process.env.FACE_LOG_CHANNEL; // バグ⑤修正：ハードコードを排除
+const FACE_LOG_CHANNEL = process.env.FACE_LOG_CHANNEL;
 
-// 環境変数のチェック
 if (!TOKEN) {
   console.error('❌ ERROR: TOKEN が .env に設定されていません。');
   process.exit(1);
-}
-if (!ACTIVE_ROLE_ID) {
-  console.warn('⚠️ WARNING: ACTIVE_ROLE_ID が設定されていません。アクティブロール機能が正しく動作しない可能性があります。');
-}
-if (!FACE_LOG_CHANNEL) {
-  console.warn('⚠️ WARNING: FACE_LOG_CHANNEL が設定されていません。顔認識ログが送信されません。');
 }
 
 const APP_DATA_DIR = path.join(__dirname, 'app-data');
 if (!fs.existsSync(APP_DATA_DIR)) fs.mkdirSync(APP_DATA_DIR, { recursive: true });
 
-// === process-level safety handlers ===
 process.on('uncaughtException', (err) => {
   console.error('🚨 uncaughtException:', err);
 });
@@ -72,7 +64,6 @@ process.on('unhandledRejection', (reason) => {
   console.error('🚨 unhandledRejection:', reason);
 });
 
-// === Discord Client ===
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -89,12 +80,10 @@ const client = new Client({
   partials: [Partials.Channel, Partials.Message, Partials.Reaction],
 });
 
-// === Expressサーバ ===
 const app = express();
 app.get('/', (req, res) => res.send('Bot is running'));
 app.listen(PORT, () => console.log('Server listening on port ' + PORT));
 
-// === Interaction処理 ===
 client.on('interactionCreate', async (interaction) => {
   try {
     if (interaction.isChatInputCommand()) {
@@ -112,86 +101,52 @@ client.on('interactionCreate', async (interaction) => {
         await ticket.modalHandler(interaction);
       } else if (interaction.customId.startsWith('verify_')) {
         await verify.modalHandler(interaction);
-      } else {
-        console.warn('未処理のモーダルID:', interaction.customId);
       }
     }
   } catch (err) {
     console.error('interactionCreate error:', err);
-    try {
-      const errorMsg = { content: '⚠️ エラーが発生しました。', ephemeral: true };
-      if (interaction.deferred || interaction.replied) {
-        await interaction.followUp(errorMsg);
-      } else {
-        await interaction.reply(errorMsg);
-      }
-    } catch (e) {
-      console.error('followUp/reply error:', e);
-    }
   }
 });
 
-// === Readyイベント (clientReady に変更して警告を解消) ===
-client.once('clientReady', async () => {
+// === 【修正】 clientReady -> ready に変更 ===
+client.once('ready', async () => {
   console.log('Logged in as ' + client.user.tag);
 
   try {
-    // 顔認識初期化
     await initFaceRecognition();
     console.log('Face recognition initialized');
 
-    // Debug: check yt-dlp availability
-    try {
-      const which = spawnSync('which', ['yt-dlp'], { encoding: 'utf8' });
-      console.log('DEBUG: which yt-dlp status=', which.status, 'stdout=', which.stdout?.trim());
-    } catch (e) {
-      console.log('DEBUG: which yt-dlp failed:', e);
-    }
-
-    // デフォルト顔登録
     try {
       const localFacePath = path.join(__dirname, 'face.jpg');
       if (fs.existsSync(localFacePath)) {
         await registerFace(localFacePath);
-        console.log('Face registered from local face.jpg');
       } else {
         await registerFace('https://i.imgur.com/DkoHDM9.jpg');
-        console.log('Face registered from fallback URL');
       }
     } catch (faceError) {
-      console.error('Face registration failed:', faceError.message || faceError);
+      console.error('Face registration failed:', faceError.message);
     }
 
-    // 各種初期化とデータロード
     await ensureDropboxInit();
     await loadActivity();
     await loadLevelData();
-    preloadQuizzes();
+    preloadQuizzes(); // これでクイズデータがロードされる
     await loadWeeklyData();
 
-    // 認証パネル自動再設置
     await verify.restoreVerifyMessage(client);
-    console.log('✅ 認証パネル自動再設置完了');
-
-    // 週次処理セットアップ
     setupWeekly(client, WEEKLY_CHANNEL_ID);
-
-    // スラッシュコマンド登録
     await registerSlashCommands(client);
-    console.log('Slash commands registered');
+    console.log('✅ All systems initialized and Slash commands registered');
   } catch (err) {
     console.error('Ready event initialization error:', err);
   }
 
-  // 定期処理: アンチレイド類似顔ハッシュクリア
   setInterval(() => {
     for (const guildTracker of antiRaid.similarityTracker.values()) {
       antiRaid.cleanupSimilarityTracker(guildTracker, antiRaid.SIMILARITY_HASH_EXPIRY_MS);
     }
   }, antiRaid.CLEANUP_INTERVAL_MS);
-  console.log('[Anti-Raid] Hash cleanup started.');
 
-  // 定期処理: Botステータス更新
   const start = Date.now();
   setInterval(() => {
     const elapsed = Date.now() - start;
@@ -204,63 +159,41 @@ client.once('clientReady', async () => {
   }, 5000);
 });
 
-// === 類似顔検出処理 ===
 async function handleFaceMatch(message) {
-  try {
-    await message.delete();
-  } catch (e) {}
-
+  try { await message.delete(); } catch (e) {}
   const member = message.member;
-  let timeoutResult = '❌ タイムアウト失敗';
+  let timeoutResult = '❌ 失敗';
   let timeoutTag = '不明';
 
   if (member && member.manageable) {
     try {
       await member.timeout(7 * 24 * 60 * 60 * 1000, 'Face image auto timeout');
-      timeoutResult = '✅ タイムアウト成功';
+      timeoutResult = '✅ 成功';
       timeoutTag = member.user.tag;
-      console.log('⏱️ 1週間タイムアウト: ' + timeoutTag);
-    } catch (err) {
-      console.error('⛔ タイムアウトエラー:', err);
-    }
+    } catch (err) { console.error('Timeout error:', err); }
   }
 
   try {
-    // バグ⑤修正：ハードコードされていた ID を環境変数から取得
-    if (!FACE_LOG_CHANNEL) throw new Error('FACE_LOG_CHANNEL is not defined in .env');
-    
+    if (!FACE_LOG_CHANNEL) return;
     const logChannel = await client.channels.fetch(FACE_LOG_CHANNEL);
     if (logChannel && logChannel.isTextBased()) {
       await logChannel.send({
-        content:
-          `🧹 類似顔画像を削除しました\n` +
-          `👤 投稿者: ${timeoutTag} (<@${message.author.id}>)\n` +
-          `📨 メッセージID: ${message.id}\n` +
-          `⏱️ タイムアウト結果: ${timeoutResult}\n` +
-          `📍 チャンネル: <#${message.channel.id}>`,
+        content: `🧹 類似顔画像を削除しました\n👤 投稿者: ${timeoutTag} (<@${message.author.id}>)\n⏱️ タイムアウト: ${timeoutResult}`,
         allowedMentions: { users: [], roles: [] },
       });
     }
-  } catch (logErr) {
-    console.error('📛 ログ送信エラー:', logErr.message || logErr);
-  }
-
-  console.log('🧹 類似顔画像を削除: ' + message.id);
+  } catch (logErr) { console.error('Log error:', logErr); }
 }
 
-// === メッセージ処理 ===
 client.on('messageCreate', async (message) => {
   try {
     if (message.author.bot) return;
-
     if (message.channel.type === ChannelType.DM) {
       await antiRaid.handleDirectMessage(message);
       return;
     }
-
     if (!message.guild) return;
 
-    // 画像チェック
     const attachments = message.attachments.values();
     for (const attachment of attachments) {
       if (attachment.contentType?.startsWith('image/')) {
@@ -281,15 +214,11 @@ client.on('messageCreate', async (message) => {
       }
     }
 
-    // 各種処理
     await antiRaid.handleMessage(message);
-
     if (message.author.id && ACTIVE_ROLE_ID) {
       await addMessage(message.guild.id, message.author.id, client, ACTIVE_ROLE_ID);
     }
-
     if (message.member) await addXp(message.member);
-
     await handlePrefixMessage(client, message);
 
   } catch (err) {
@@ -297,16 +226,10 @@ client.on('messageCreate', async (message) => {
   }
 });
 
-// === 定期リセット ===
 cron.schedule('0 0 1 * *', async () => {
-  try {
-    await resetMonthlyActivity(client);
-  } catch (err) {
-    console.error('Monthly reset failed:', err);
-  }
+  try { await resetMonthlyActivity(client); } catch (err) { console.error('Monthly reset failed:', err); }
 });
 
-// === イベントハンドラ ===
 client.on('messageUpdate', handleMessageUpdate);
 client.on('guildMemberAdd', handleMemberJoin);
 client.on('guildMemberRemove', onGuildMemberRemove);
