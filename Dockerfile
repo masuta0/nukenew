@@ -26,13 +26,11 @@ RUN if [ -f package-lock.json ]; then npm ci --omit=dev --legacy-peer-deps; else
 # Copy app sources
 COPY . .
 
-# --- 🚀 [NEW] モデルファイルの自動ダウンロード機能 ---
-# 手動アップロードによる「ファイル不足エラー」を完全に撲滅します。
-# 必要なモデルのリストを定義して、公式から直接ダウンロードします。
+# --- 🚀 [FIXED] モデルファイルの自動ダウンロード (互換性重視) ---
+# 配列を使わず、シンプルな文字列ループに変更しました。これにより /bin/sh でも動作します。
 RUN mkdir -p /app/utils/models && \
     MODEL_BASE_URL="https://raw.githubusercontent.com/justadudewhohacks/face-api.js/master/weights" && \
-    MODELS=("ssd_mobilenetv1_model" "face_landmark_68_model" "face_recognition_model" "face_expression_model" "tiny_face_detector_model") && \
-    for MODEL in "${MODELS[@]}"; do \
+    for MODEL in ssd_mobilenetv1_model face_landmark_68_model face_recognition_model face_expression_model tiny_face_detector_model; do \
         curl -L "${MODEL_BASE_URL}/${MODEL}-weights_manifest.json" -o "/app/utils/models/${MODEL}-weights_manifest.json" && \
         curl -L "${MODEL_BASE_URL}/${MODEL}.bin" -o "/app/utils/models/${MODEL}.bin"; \
     done
