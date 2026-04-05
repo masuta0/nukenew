@@ -8,6 +8,7 @@ const {
   addRoleToAll,
   resetServerChannels,
 } = require("../utils/guild");
+const { PermissionFlagsBits } = require('discord.js');
 const {
   addMessage,
   getRanking,
@@ -182,7 +183,7 @@ module.exports = async function handlePrefixMessage(client, msg) {
       await safeReplyAndDelete(`全ユーザーにロール「${roleName}」を付与しました。`);
       break;
     case "clear":
-      if (!msg.member.permissions.has("MANAGE_MESSAGES")) return safeReplyErrorAndDelete("権限がありません。");
+      if (!msg.member.permissions.has(PermissionFlagsBits.ManageMessages)) return safeReplyErrorAndDelete("権限がありません。");
       const amount = parseInt(args[0]);
       if (isNaN(amount) || amount < 1) return safeReplyErrorAndDelete("削除数を指定してください。");
       const targetMember = msg.mentions.members.first() || null;
@@ -190,7 +191,7 @@ module.exports = async function handlePrefixMessage(client, msg) {
       await clearMessages(msg.channel, amount, msg.channel, targetMember);
       break;
     case "ranking":
-      const ranking = await getRanking(msg.guild);
+      const ranking = getRanking(msg.guild.id);
       if (!ranking.length) return safeReplyErrorAndDelete("ランキングデータはありません。");
       const rankingStr = ranking.map((u, i) => `${i + 1}位 <@${u.userId}>: ${u.count}回`).join("\n");
       await safeReplyAndDelete(`**月間アクティブユーザーランキング**\n${rankingStr}`);
