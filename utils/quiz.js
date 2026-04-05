@@ -1,25 +1,34 @@
 // utils/quiz.js
-const fs = require("fs");
-const path = require("path");
-const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
+const fs = require('fs');
+const path = require('path');
+const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 
 let quizzes = {};
-const activeUsers = new Set(); // 参加中ユーザー管理
-const blockedChannelIds = [
-  "1422418627704914002",
-  "1422418631563804673",
-  "1422418642078928916",
-  "1422418645945946122"
-]; // クイズ禁止チャンネル
+const activeUsers   = new Set(); // ユーザー単位のロック
+const activeChannels = new Set(); // チャンネル単位のロック（二重出題防止）
 
-// クイズデータロード
+const blockedChannelIds = [
+  '1422418627704914002',
+  '1422418631563803673',
+  '1422418642078928916',
+  '1422418645945946122',
+];
+
 function preloadQuizzes() {
   try {
-    const data = fs.readFileSync(path.join(__dirname, "../quizzes.json"), "utf-8");
+    const data = fs.readFileSync(path.join(__dirname, '../quizzes.json'), 'utf-8');
     quizzes = JSON.parse(data);
-    console.log("✅ Quiz data loaded successfully.");
+    // 選択肢の重複を起動時に自動修正
+    for (const cat of Object.keys(quizzes)) {
+      for (const q of quizzes[cat]) {
+        if (q.choices) {
+          q.choices = [...new Set(q.choices)];
+        }
+      }
+    }
+    console.log('✅ Quiz data loaded successfully.');
   } catch (err) {
-    console.error("❌ Failed to load quiz data:", err);
+    console.error('❌ Failed to load quiz data:', err);
   }
 }
 
@@ -27,107 +36,152 @@ function getRandomQuiz(category = null) {
   const categories = Object.keys(quizzes);
   if (categories.length === 0) return null;
 
-  if (category && quizzes[category]) {
-    const questions = quizzes[category];
-    if (!questions || questions.length === 0) return null;
-    const q = questions[Math.floor(Math.random() * questions.length)];
-    return { category, question: q.q, answer: q.a, choices: q.choices };
-  }
+  const cat = (category && quizzes[category]) ? category
+    : categories[Math.floor(Math.random() * categories.length)];
 
-  // ランダム
-  const randomCategory = categories[Math.floor(Math.random() * categories.length)];
-  const questions = quizzes[randomCategory];
+  const questions = quizzes[cat];
   if (!questions || questions.length === 0) return null;
+
   const q = questions[Math.floor(Math.random() * questions.length)];
-  return { category: randomCategory, question: q.q, answer: q.a, choices: q.choices };
+  return { category: cat, question: q.q, answer: q.a, choices: q.choices };
 }
 
-// target: prefix の場合は TextChannel、slash の場合は Interaction
-async function quizManager(target, user = null, category = null) {
-  let channel, isSlash = false;
-
-  if (target.channel && target.isChatInputCommand) {
-    // Slash
-    isSlash = true;
-    channel = target.channel;
-    user = target.user;
-  } else {
-    // Prefix
-    channel = target;
-  }
-
-  // 禁止チャンネルチェック
-  if (blockedChannelIds.includes(channel.id) || channel.name?.includes("雑談")) {
-    const warningMsg = await channel.send(`❌ このチャンネルではクイズは使えません`);
-    setTimeout(() => warningMsg.delete().catch(() => {}), 5000);
-    return;
-  }
-
-  // 参加中ユーザー制御
-  if (activeUsers.has(user.id)) {
-    const warn = await channel.send("❌ あなたは既にクイズに参加中です。");
-    setTimeout(() => warn.delete().catch(() => {}), 5000);
-    return;
-  }
-  activeUsers.add(user.id);
-
-  const quiz = getRandomQuiz(category);
-  if (!quiz || !quiz.choices || quiz.choices.length === 0) {
-    await channel.send("⚠️ クイズデータが不十分です。");
-    activeUsers.delete(user.id);
-    return;
-  }
-
-  // ボタン作成
-  const buttons = new ActionRowBuilder();
+function buildQuizButtons(quiz) {
+  const row = new ActionRowBuilder();
   quiz.choices.forEach((choice, idx) => {
-    buttons.addComponents(
+    row.addComponents(
       new ButtonBuilder()
         .setCustomId(`quiz_${idx}`)
         .setLabel(choice)
         .setStyle(ButtonStyle.Primary)
     );
   });
+  return row;
+}
 
-  // 出題
-  let msg;
-  if (isSlash) {
-    msg = await target.reply({
-      content: `📝 **${quiz.category}クイズ**\n${quiz.question}`,
-      components: [buttons],
-      fetchReply: true,
-    });
+async function quizManager(target, user = null, category = null) {
+  let channel, isSlash = false;
+
+  if (target.channel && typeof target.isChatInputCommand === 'function') {
+    isSlash = true;
+    channel = target.channel;
+    user = target.user;
   } else {
-    msg = await channel.send({
-      content: `📝 **${quiz.category}クイズ**\n${quiz.question}`,
-      components: [buttons],
+    channel = target;
+  }
+
+  // 禁止チャンネルチェック
+  if (blockedChannelIds.includes(channel.id) || channel.name?.includes('雑談')) {
+    const w = await channel.send('❌ このチャンネルではクイズは使えません');
+    setTimeout(() => w.delete().catch(() => {}), 5000);
+    return;
+  }
+
+  // チャンネル二重出題防止
+  if (activeChannels.has(channel.id)) {
+    const w = await channel.send('⏳ このチャンネルでは既にクイズ進行中です。');
+    setTimeout(() => w.delete().catch(() => {}), 5000);
+    return;
+  }
+
+  // ユーザー参加中チェック
+  if (activeUsers.has(user.id)) {
+    const w = await channel.send('❌ あなたは既にクイズに参加中です。');
+    setTimeout(() => w.delete().catch(() => {}), 5000);
+    return;
+  }
+
+  const quiz = getRandomQuiz(category);
+  if (!quiz || !quiz.choices || quiz.choices.length === 0) {
+    await channel.send('⚠️ クイズデータが不十分です。');
+    return;
+  }
+
+  // ロック
+  activeUsers.add(user.id);
+  activeChannels.add(channel.id);
+
+  async function runRound(currentQuiz) {
+    const row = buildQuizButtons(currentQuiz);
+    let msg;
+    if (isSlash && !isSlash._replied) {
+      msg = await channel.send({
+        content: `📝 **${currentQuiz.category}クイズ**\n${currentQuiz.question}`,
+        components: [row],
+      });
+    } else {
+      msg = await channel.send({
+        content: `📝 **${currentQuiz.category}クイズ**\n${currentQuiz.question}`,
+        components: [row],
+      });
+    }
+
+    return new Promise((resolve) => {
+      const filter = (i) => i.user.id === user.id && i.customId.startsWith('quiz_');
+      const collector = msg.createMessageComponentCollector({ filter, time: 30000 });
+
+      collector.on('collect', async (i) => {
+        const idx = parseInt(i.customId.split('_')[1], 10);
+        const isCorrect = currentQuiz.choices[idx] === currentQuiz.answer;
+        const resultText = isCorrect
+          ? `✅ 正解！ (${currentQuiz.answer})`
+          : `❌ 不正解... 正解は **${currentQuiz.answer}** でした。`;
+
+        // 「もう一度」ボタン
+        const nextRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId('quiz_next')
+            .setLabel('🔁 もう一度')
+            .setStyle(ButtonStyle.Success),
+          new ButtonBuilder()
+            .setCustomId('quiz_end')
+            .setLabel('⏹ 終了')
+            .setStyle(ButtonStyle.Danger),
+        );
+
+        await i.update({ content: resultText, components: [nextRow] });
+        collector.stop('answered');
+
+        // 「もう一度」/「終了」の受付
+        const endFilter = (j) => j.user.id === user.id && (j.customId === 'quiz_next' || j.customId === 'quiz_end');
+        const endCollector = msg.createMessageComponentCollector({ filter: endFilter, time: 20000, max: 1 });
+
+        endCollector.on('collect', async (j) => {
+          if (j.customId === 'quiz_next') {
+            await j.update({ content: resultText, components: [] });
+            resolve('next');
+          } else {
+            await j.update({ content: resultText + '\nクイズを終了しました！', components: [] });
+            resolve('end');
+          }
+        });
+
+        endCollector.on('end', (_, reason) => {
+          if (reason === 'time') resolve('end');
+        });
+      });
+
+      collector.on('end', async (_, reason) => {
+        if (reason === 'time') {
+          await msg.edit({ content: `⌛ 時間切れ！ 正解は **${currentQuiz.answer}** でした。`, components: [] }).catch(() => {});
+          resolve('end');
+        }
+      });
     });
   }
 
-  // 回答待ち (30秒)
-  const filter = (i) => i.user.id === user.id;
-  const collector = msg.createMessageComponentCollector({ filter, time: 30000 });
-
-  collector.on("collect", async (i) => {
-    if (!i.isButton()) return;
-    const selectedIndex = parseInt(i.customId.split("_")[1], 10);
-    const isCorrect = quiz.choices[selectedIndex] === quiz.answer;
-
-    const content = isCorrect
-      ? `✅ 正解！ (${quiz.answer})`
-      : `❌ 不正解... 正解は **${quiz.answer}** でした。`;
-
-    await i.update({ content, components: [] });
-    collector.stop("answered");
-  });
-
-  collector.on("end", async (_, reason) => {
-    if (reason === "time") {
-      await channel.send(`⌛ 時間切れ！ 正解は **${quiz.answer}** でした。`);
+  try {
+    let action = 'next';
+    while (action === 'next') {
+      const next = getRandomQuiz(category);
+      if (!next) break;
+      action = await runRound(next);
     }
-    // クイズ終了 → 参加解除
+  } finally {
+    // 必ずロック解除
     activeUsers.delete(user.id);
-  });
+    activeChannels.delete(channel.id);
+  }
 }
 
 module.exports = { preloadQuizzes, getRandomQuiz, quizManager, blockedChannelIds, activeUsers };
