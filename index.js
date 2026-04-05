@@ -104,7 +104,7 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// === 【修正】 頑丈な ready イベント ===
+// === 【修正】 高速・頑丈な ready イベント ===
 client.once('ready', async () => {
   console.log('🚀 Bot logged in as ' + client.user.tag);
 
@@ -125,14 +125,17 @@ client.once('ready', async () => {
     { name: 'Slash Commands', fn: async () => { await registerSlashCommands(client); } },
   ];
 
-  for (const task of initTasks) {
-    try {
-      await task.fn();
-      console.log(`✅ ${task.name} initialized`);
-    } catch (err) {
-      console.error(`❌ ${task.name} failed:`, err.message || err);
+  console.log('⏳ Initializing all systems in parallel...');
+  const results = await Promise.allSettled(initTasks.map(task => task.fn()));
+
+  results.forEach((result, index) => {
+    const taskName = initTasks[index].name;
+    if (result.status === 'fulfilled') {
+      console.log(`✅ ${taskName} initialized`);
+    } else {
+      console.error(`❌ ${taskName} failed:`, result.reason.message || result.reason);
     }
-  }
+  });
 
   console.log('✨ Bot startup sequence completed.');
 
