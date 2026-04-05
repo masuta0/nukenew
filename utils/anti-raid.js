@@ -162,6 +162,16 @@ const RAID_KEYWORDS = [
   '.gg/mol'
 ];
 
+// ===== 招待リンクスパム対策 =====
+// discord.gg/ を含む怪しい招待リンク（ホワイトリストの既知リンクを除く）
+const ALLOWED_INVITE_LINKS = [
+  'discord.gg/9ScuqvxzD7', // ますまに共栄圏公式
+];
+const INVITE_REGEX = /discord(?:app)?\.(?:gg|com\/invite)\/([A-Za-z0-9-]+)/gi;
+
+// ===== メンションスパム対策 =====
+const MENTION_SPAM_THRESHOLD = 5; // 1メッセージ中のメンション数上限
+
 const DANGEROUS_PERMISSIONS = [
   PermissionsBitField.Flags.Administrator, PermissionsBitField.Flags.ManageChannels, PermissionsBitField.Flags.ManageRoles,
   PermissionsBitField.Flags.KickMembers, PermissionsBitField.Flags.BanMembers, PermissionsBitField.Flags.ManageGuild,
@@ -603,12 +613,14 @@ async function handleMemberJoin(member) {
   }
 
   const age = now - member.user.createdAt.getTime();
-  if (age < 24 * 60 * 60 * 1000) {
-    const newScore = addScore(member.id, c.ACCOUNT_AGE);
+  if (age < 7 * 24 * 60 * 60 * 1000) {
+    // 7日未満のアカウント。1日未満はスコア増加
+    const ageBonus = age < 24 * 60 * 60 * 1000 ? c.ACCOUNT_AGE : Math.floor(c.ACCOUNT_AGE * 0.5);
+    const newScore = addScore(member.id, ageBonus);
     await sendLogEmbed(member.guild, {
       title: '⚠️ 新規アカウント参加',
       member,
-      description: `年齢 < 24h → +${c.ACCOUNT_AGE}\n現在: ${newScore}/${c.THRESHOLD}`,
+      description: `年齢 ${Math.floor(age / 3600000)}h → +${ageBonus}\n現在: ${newScore}/${c.THRESHOLD}`,
       color: 0xffa200,
     });
     await punishByScore(member, '新規アカウント', 'system');
@@ -823,6 +835,49 @@ async function handleMessage(message) {
       content: message.content,
     });
     return punishByScore(member, 'Zalgo 乱用', message.channel?.name);
+  }
+
+  // ===== 招待リンクスパム検知 =====
+  {
+    const rawContent = message.content || '';
+    const inviteMatches = [...rawContent.matchAll(INVITE_REGEX)];
+    if (inviteMatches.length > 0) {
+      const isAllowed = inviteMatches.every(m =>
+        ALLOWED_INVITE_LINKS.some(allowed => allowed.toLowerCase().includes(m[1].toLowerCase()))
+      );
+      if (!isAllowed) {
+        const s = addScore(uid, currentCfg().KEYWORD);
+        await safeDelete(message, '招待リンクスパム');
+        await sendLogEmbed(message.guild, {
+          title: '🚨 招待リンクスパム',
+          member,
+          description: `外部サーバーへの招待リンクを検知\n+${currentCfg().KEYWORD} / 現在 ${s}/${currentCfg().THRESHOLD}`,
+          channelName: message.channel?.name,
+          content: rawContent,
+        });
+        return punishByScore(member, '招待リンクスパム', message.channel?.name);
+      }
+    }
+  }
+
+  // ===== メンションスパム検知 =====
+  {
+    const mentionCount =
+      (message.mentions?.users?.size || 0) +
+      (message.mentions?.roles?.size || 0) +
+      (message.mentions?.everyone ? 1 : 0);
+    if (mentionCount >= MENTION_SPAM_THRESHOLD) {
+      const s = addScore(uid, currentCfg().KEYWORD);
+      await safeDelete(message, 'メンションスパム');
+      await sendLogEmbed(message.guild, {
+        title: '🚨 メンションスパム',
+        member,
+        description: `1メッセージに ${mentionCount} 件のメンション\n+${currentCfg().KEYWORD} / 現在 ${s}/${currentCfg().THRESHOLD}`,
+        channelName: message.channel?.name,
+        content: message.content,
+      });
+      return punishByScore(member, 'メンションスパム', message.channel?.name);
+    }
   }
 
   // ★ 修正済み: 類似メッセージ検知システムを新しい関数で呼び出し
