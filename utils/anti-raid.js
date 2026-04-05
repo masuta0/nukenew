@@ -603,6 +603,16 @@ async function handleMemberJoin(member) {
       description: `過去1分で ${recent.length} 人が参加`,
       color: 0xff4757,
     });
+    // ロックダウン: 認証レベルを一時的に最高に引き上げ
+    const prevLevel = member.guild.verificationLevel;
+    await member.guild.setVerificationLevel(4, 'Raid対策: 一時ロックダウン').catch(() => {});
+    await sendPlainLog(member.guild, LOG_CHANNEL_ID,
+      `🔒 **ロックダウン開始**: 認証レベルを最高(4)に引き上げました。10分後に自動解除します。`);
+    setTimeout(async () => {
+      await member.guild.setVerificationLevel(prevLevel, 'Raid対策: ロックダウン解除').catch(() => {});
+      await sendPlainLog(member.guild, LOG_CHANNEL_ID, `🔓 **ロックダウン解除**: 認証レベルを元に戻しました。`);
+    }, 10 * 60 * 1000);
+
     for (const j of recent) {
       const m = await member.guild.members.fetch(j.id).catch(() => null);
       if (!m) continue;
@@ -624,6 +634,17 @@ async function handleMemberJoin(member) {
       color: 0xffa200,
     });
     await punishByScore(member, '新規アカウント', 'system');
+  }
+
+  // アバターなしアカウントの検知（Raid Botに多い）
+  if (!member.user.avatar) {
+    const noAvatarScore = addScore(member.id, Math.floor(c.ACCOUNT_AGE * 0.5));
+    await sendLogEmbed(member.guild, {
+      title: '⚠️ アバターなし参加',
+      member,
+      description: `デフォルトアバター → +${Math.floor(c.ACCOUNT_AGE * 0.5)}\n現在: ${noAvatarScore}/${c.THRESHOLD}`,
+      color: 0xffa200,
+    });
   }
 
   if (JOIN_LOG_CHANNEL_ID) {
@@ -1099,36 +1120,49 @@ async function handleBotAdd(member) {
   return false;
 }
 
-// ====== ロール更新 (@everyone 危険権限検知) ======
+// ====== ロール更新（全ロール対応・危険権限検知） ======
 async function handleRoleUpdate(oldRole, newRole) {
-  if (oldRole.id !== oldRole.guild.id) return;
   const before = oldRole.permissions;
   const after = newRole.permissions;
   const added = DANGEROUS_PERMISSIONS.filter(p => after.has(p) && !before.has(p));
   if (added.length === 0) return;
 
+  const isEveryone = oldRole.id === oldRole.guild.id;
+  const addedNames = added.map(p => {
+    const key = Object.keys(PermissionsBitField.Flags).find(k => PermissionsBitField.Flags[k] === p);
+    return key || String(p);
+  });
+
   try {
-    const logs = await oldRole.guild.fetchAuditLogs({
-      type: AuditLogEvent.RoleUpdate,
-      limit: 1
-    });
-    const entry = logs.entries.first();
+    const logs = await oldRole.guild.fetchAuditLogs({ type: AuditLogEvent.RoleUpdate, limit: 3 });
+    const entry = logs.entries.find(e => e.target?.id === oldRole.id);
     const executor = entry?.executor;
     if (!executor) return;
 
     const member = oldRole.guild.members.cache.get(executor.id);
     if (!member || isWhitelisted(member)) return;
 
-    await newRole.setPermissions(before, '危険権限の自動削除');
-    await oldRole.guild.members.ban(executor.id, {
-      reason: '@everyone に危険権限を付与'
-    }).catch(() => {});
-    await sendLogEmbed(oldRole.guild, {
-      title: '🚨 危険権限を検知し差し戻し',
-      member,
-      description: `追加された権限: ${added.map(p => PermissionsBitField.Flags[p]).join(', ')}`,
-    });
+    // 危険権限を即座に差し戻す
+    await newRole.setPermissions(before, '危険権限の自動差し戻し').catch(() => {});
 
+    if (isEveryone) {
+      // @everyone への危険権限付与は即BAN
+      await oldRole.guild.members.ban(executor.id, { reason: '@everyone に危険権限を付与' }).catch(() => {});
+      await sendLogEmbed(oldRole.guild, {
+        title: '🚨 @everyone 危険権限付与 → 即BAN・差し戻し',
+        member,
+        description: `付与された権限: ${addedNames.join(', ')}\n権限は自動差し戻し済み`,
+      });
+    } else {
+      // 通常ロールへの危険権限付与は権限剥奪
+      const ok = await stripAllRoles(oldRole.guild, executor.id, `ロール「${oldRole.name}」に危険権限を付与`);
+      await sendLogEmbed(oldRole.guild, {
+        title: `⚠️ ロール「${oldRole.name}」に危険権限付与 → 権限剥奪`,
+        member,
+        description: `付与された権限: ${addedNames.join(', ')}\n権限は自動差し戻し済み\n実行者権限剥奪: ${ok}`,
+        color: 0xff4757,
+      });
+    }
   } catch {}
 }
 
@@ -1330,16 +1364,188 @@ async function handleDirectMessage(message) {
   pendingModActions.delete(message.author.id);
 }
 
+// ====== サーバー設定変更監視 ======
+async function handleGuildUpdate(oldGuild, newGuild) {
+  const changes = [];
+  if (oldGuild.name !== newGuild.name)
+    changes.push(`名前: 「${oldGuild.name}」→「${newGuild.name}」`);
+  if (oldGuild.icon !== newGuild.icon)
+    changes.push('アイコンが変更されました');
+  if (oldGuild.verificationLevel !== newGuild.verificationLevel)
+    changes.push(`認証レベル: ${oldGuild.verificationLevel} → ${newGuild.verificationLevel}`);
+  if (oldGuild.explicitContentFilter !== newGuild.explicitContentFilter)
+    changes.push(`コンテンツフィルター変更`);
+  if (changes.length === 0) return;
+
+  try {
+    const logs = await newGuild.fetchAuditLogs({ type: AuditLogEvent.GuildUpdate, limit: 1 });
+    const entry = logs.entries.first();
+    const executor = entry?.executor;
+    const member = executor ? newGuild.members.cache.get(executor.id) : null;
+
+    await sendLogEmbed(newGuild, {
+      title: '📋 サーバー設定変更を検知',
+      member,
+      description: changes.join('\n'),
+      color: 0x3498db,
+    });
+
+    // 認証レベルを下げた場合は差し戻し
+    if (oldGuild.verificationLevel > newGuild.verificationLevel) {
+      await newGuild.setVerificationLevel(oldGuild.verificationLevel, '荒らし対策: 認証レベル差し戻し').catch(() => {});
+      if (member && !isWhitelisted(member)) {
+        await stripAllRoles(newGuild, member.id, '認証レベルを不正に下げた');
+        await sendLogEmbed(newGuild, {
+          title: '🚨 認証レベル引き下げ → 差し戻し・権限剥奪',
+          member,
+          description: `${oldGuild.verificationLevel} → ${newGuild.verificationLevel} を差し戻しました`,
+        });
+      }
+    }
+  } catch {}
+}
+
+// ====== チャンネル作成監視（大量作成検知） ======
+const channelCreateLog = new Map();
+const CHANNEL_CREATE_THRESHOLD = 3;  // 60秒以内に3個以上
+const CHANNEL_CREATE_WINDOW = 60 * 1000;
+
+async function handleChannelCreate(channel) {
+  if (!channel.guild) return;
+  try {
+    const logs = await channel.guild.fetchAuditLogs({ type: AuditLogEvent.ChannelCreate, limit: 1 });
+    const entry = logs.entries.first();
+    const executor = entry?.executor;
+    if (!executor) return;
+    const member = channel.guild.members.cache.get(executor.id);
+    if (!member || isWhitelisted(member)) return;
+
+    const now = Date.now();
+    if (!channelCreateLog.has(executor.id)) channelCreateLog.set(executor.id, []);
+    const arr = channelCreateLog.get(executor.id);
+    arr.push(now);
+    const recent = arr.filter(t => now - t < CHANNEL_CREATE_WINDOW);
+    channelCreateLog.set(executor.id, recent);
+
+    await sendLogEmbed(channel.guild, {
+      title: '📋 チャンネル作成',
+      member,
+      description: `#${channel.name} が作成されました（直近60秒: ${recent.length}回）`,
+      color: 0x3498db,
+    });
+
+    if (recent.length >= CHANNEL_CREATE_THRESHOLD) {
+      await channel.delete('荒らし対策: 大量チャンネル作成').catch(() => {});
+      const ok = await stripAllRoles(channel.guild, executor.id, '大量チャンネル作成');
+      await sendLogEmbed(channel.guild, {
+        title: '🚨 大量チャンネル作成 → 権限剥奪',
+        member,
+        description: `60秒以内に ${recent.length} 個作成\n権限剥奪: ${ok}`,
+      });
+    }
+  } catch {}
+}
+
+// ====== チャンネル更新監視（リネーム・権限変更） ======
+async function handleChannelUpdate(oldChannel, newChannel) {
+  if (!newChannel.guild) return;
+  const changes = [];
+  if (oldChannel.name !== newChannel.name)
+    changes.push(`名前: 「${oldChannel.name}」→「${newChannel.name}」`);
+
+  // 権限上書きの変化を検知
+  const oldPerms = [...(oldChannel.permissionOverwrites?.cache?.values() || [])];
+  const newPerms = [...(newChannel.permissionOverwrites?.cache?.values() || [])];
+  if (oldPerms.length !== newPerms.length)
+    changes.push(`権限設定が変更されました（${oldPerms.length}→${newPerms.length}件）`);
+
+  if (changes.length === 0) return;
+
+  try {
+    const logs = await newChannel.guild.fetchAuditLogs({ type: AuditLogEvent.ChannelUpdate, limit: 1 });
+    const entry = logs.entries.first();
+    const executor = entry?.executor;
+    const member = executor ? newChannel.guild.members.cache.get(executor.id) : null;
+
+    await sendLogEmbed(newChannel.guild, {
+      title: `📋 チャンネル変更: #${newChannel.name}`,
+      member,
+      description: changes.join('\n'),
+      color: 0x3498db,
+    });
+  } catch {}
+}
+
+// ====== ロール作成/削除監視 ======
+const roleDeleteLog = new Map();
+const ROLE_DELETE_THRESHOLD = 3;
+const ROLE_DELETE_WINDOW = 60 * 1000;
+
+async function handleRoleCreate(role) {
+  if (!role.guild) return;
+  try {
+    const logs = await role.guild.fetchAuditLogs({ type: AuditLogEvent.RoleCreate, limit: 1 });
+    const entry = logs.entries.first();
+    const executor = entry?.executor;
+    const member = executor ? role.guild.members.cache.get(executor.id) : null;
+    await sendLogEmbed(role.guild, {
+      title: `📋 ロール作成: @${role.name}`,
+      member,
+      description: `権限: ${role.permissions.toArray().join(', ') || 'なし'}`,
+      color: 0x2ecc71,
+    });
+  } catch {}
+}
+
+async function handleRoleDelete(role) {
+  if (!role.guild) return;
+  try {
+    const logs = await role.guild.fetchAuditLogs({ type: AuditLogEvent.RoleDelete, limit: 1 });
+    const entry = logs.entries.first();
+    const executor = entry?.executor;
+    if (!executor) return;
+    const member = role.guild.members.cache.get(executor.id);
+    if (!member || isWhitelisted(member)) return;
+
+    const now = Date.now();
+    if (!roleDeleteLog.has(executor.id)) roleDeleteLog.set(executor.id, []);
+    const arr = roleDeleteLog.get(executor.id);
+    arr.push(now);
+    const recent = arr.filter(t => now - t < ROLE_DELETE_WINDOW);
+    roleDeleteLog.set(executor.id, recent);
+
+    await sendLogEmbed(role.guild, {
+      title: `📋 ロール削除: @${role.name}（直近60秒: ${recent.length}回）`,
+      member,
+      description: `削除されたロール名: ${role.name}`,
+      color: 0xe74c3c,
+    });
+
+    if (recent.length >= ROLE_DELETE_THRESHOLD) {
+      const ok = await stripAllRoles(role.guild, executor.id, '大量ロール削除');
+      await sendLogEmbed(role.guild, {
+        title: '🚨 大量ロール削除 → 権限剥奪',
+        member,
+        description: `60秒以内に ${recent.length} 個削除\n権限剥奪: ${ok}`,
+      });
+    }
+  } catch {}
+}
+
 // utils/anti-raid.js の最後に追加
 module.exports = {
-  // 外部から呼び出したい関数や変数をここに列挙
   handleMemberJoin,
   handleMessage,
   handleReactionAdd,
   handleRoleUpdate,
+  handleRoleCreate,
+  handleRoleDelete,
   handleAuditLogEntry,
   handleMessageUpdate,
   handleBotAdd,
+  handleGuildUpdate,
+  handleChannelCreate,
+  handleChannelUpdate,
   onGuildMemberUpdate,
   onGuildBanAdd,
   onGuildMemberRemove,
@@ -1358,7 +1564,6 @@ module.exports = {
   isWhitelisted,
   punishByScore,
   currentCfg,
-  // 【追加】クリーンアップ機能の公開
   similarityTracker,
   SIMILARITY_HASH_EXPIRY_MS,
   CLEANUP_INTERVAL_MS,
