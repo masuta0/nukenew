@@ -160,17 +160,25 @@ module.exports = async function handlePrefixMessage(client, msg) {
         await safeReplyErrorAndDelete("AIに聞きたいことを入力してください。");
         return;
       }
-      if (checkAiCooldown(msg.author.id)) {
-        await safeReplyErrorAndDelete("AIはクールダウン中です。");
+
+      // AI専用のクールダウンチェックを呼び出す
+      const cooldown = checkAiCooldown(msg.author.id);
+      if (cooldown) {
+        // 全体制限(global)か個人制限(user)かで返信を変える
+        const msgText = cooldown.type === 'global' 
+          ? "AIが混み合っています。少し時間を置いてから試してね！" 
+          : `AIはクールダウン中です。あと ${cooldown.remaining} 秒待ってね！`;
+        
+        await safeReplyErrorAndDelete(msgText);
         return;
       }
-      setAiCooldown(msg.author.id);
+
+      // 注意：setAiCooldown は ai.js の chat 関数内で成功時に自動実行されるため、ここでは呼びません。
       const aiReply = await chat(input, msg.author.id);
       const reply = await msg.reply(aiReply).catch(() => null);
       if (reply) autoDeleteMessage(reply, AUTO_DELETE_SECONDS);
       break;
     }
-
     case "英語": {
       const input = args.join(" ");
       if (!input) {
