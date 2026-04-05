@@ -1,34 +1,66 @@
 // utils/storage.js
-const fs = require('fs');
+const fs   = require('fs');
 const path = require('path');
-const { Dropbox } = require('dropbox');
-const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
-const APP_KEY = process.env.DROPBOX_APP_KEY;
-const APP_SECRET = process.env.DROPBOX_APP_SECRET;
-const REFRESH_TOKEN = process.env.DROPBOX_REFRESH_TOKEN;
+const fetch = require('node-fetch');
+const { Dropbox, DropboxAuth } = require('dropbox');
+
+// ===== 認証情報の取得（env優先 → dropbox_token.json フォールバック） =====
+function loadDropboxCredentials() {
+  if (process.env.DROPBOX_APP_KEY && process.env.DROPBOX_APP_SECRET && process.env.DROPBOX_REFRESH_TOKEN) {
+    return {
+      appKey:       process.env.DROPBOX_APP_KEY,
+      appSecret:    process.env.DROPBOX_APP_SECRET,
+      refreshToken: process.env.DROPBOX_REFRESH_TOKEN,
+    };
+  }
+  try {
+    const tokenPath = path.join(__dirname, '../dropbox_token.json');
+    if (fs.existsSync(tokenPath)) {
+      const raw = JSON.parse(fs.readFileSync(tokenPath, 'utf8'));
+      if (raw.refresh_token) {
+        console.log('📦 dropbox_token.json からDropbox認証情報を読み込みました。');
+        return {
+          appKey:       process.env.DROPBOX_APP_KEY    || '',
+          appSecret:    process.env.DROPBOX_APP_SECRET || '',
+          refreshToken: raw.refresh_token,
+        };
+      }
+    }
+  } catch (e) {
+    console.warn('⚠️ dropbox_token.json の読み込みに失敗しました:', e.message);
+  }
+  return null;
+}
+
 let dbx = null;
 
 async function ensureDropboxInit() {
-  if (!APP_KEY || !APP_SECRET || !REFRESH_TOKEN) {
-    console.warn('Dropbox環境変数が設定されていません。Dropbox機能はスキップされます。');
+  if (dbx) return dbx;
+
+  const creds = loadDropboxCredentials();
+  if (!creds || !creds.refreshToken) {
+    console.warn('⚠️ Dropbox認証情報が見つかりません。Dropbox機能はスキップされます。');
     return null;
   }
-  if (!dbx) {
-    try {
-      dbx = new Dropbox({
-        clientId: APP_KEY,
-        clientSecret: APP_SECRET,
-        refreshToken: REFRESH_TOKEN,
-        fetch,
-      });
-      await dbx.auth.refreshAccessToken();
-      console.log("✅ Dropboxクライアントを初期化しました。");
-    } catch (e) {
-      console.error('❌ Dropboxクライアントの初期化に失敗しました。認証情報を確認してください:', e);
-      return null;
-    }
+
+  try {
+    const dbxAuth = new DropboxAuth({
+      clientId:     creds.appKey,
+      clientSecret: creds.appSecret,
+      refreshToken: creds.refreshToken,
+      fetch,
+    });
+
+    await dbxAuth.refreshAccessToken();
+    console.log('✅ Dropboxアクセストークンを取得しました。');
+
+    dbx = new Dropbox({ auth: dbxAuth, fetch });
+    console.log('✅ Dropboxクライアントを初期化しました。');
+    return dbx;
+  } catch (e) {
+    console.error('❌ Dropbox初期化に失敗しました:', e?.error || e?.message || e);
+    return null;
   }
-  return dbx;
 }
 
 async function ensureFolder(folderPath) {
@@ -36,13 +68,9 @@ async function ensureFolder(folderPath) {
   if (!client) return false;
   try {
     await client.filesCreateFolderV2({ path: folderPath, autorename: false });
-    console.log(`✅ Dropboxにフォルダを作成しました: ${folderPath}`);
     return true;
   } catch (e) {
-    if (e.error?.error?.path?.['.tag'] === 'conflict') {
-      console.log(`⚠️ Dropboxフォルダは既に存在します: ${folderPath}`);
-      return true;
-    }
+    if (e?.error?.error?.path?.['.tag'] === 'conflict') return true;
     console.error('❌ Dropbox ensureFolder失敗:', e?.error || e?.message || e);
     return false;
   }
@@ -51,20 +79,19 @@ async function ensureFolder(folderPath) {
 async function uploadToDropbox(dropboxPath, contents) {
   const client = await ensureDropboxInit();
   if (!client) {
-    console.error('❌ Dropboxクライアントの初期化に失敗しました。');
+    console.error('❌ Dropboxクライアント未初期化のためアップロードをスキップします。');
     return false;
   }
   try {
     await client.filesUpload({
       path: dropboxPath,
       contents,
-      mode: { '.tag': 'overwrite' }
+      mode: { '.tag': 'overwrite' },
     });
-    console.log(`✅ Dropboxにアップロード成功: ${dropboxPath}`);
+    console.log('✅ Dropboxアップロード成功: ' + dropboxPath);
     return true;
   } catch (err) {
-    // ★ 修正: エラー内容をコンソールに出力する
-    console.error(`❌ Dropboxアップロード失敗:`, err?.error || err?.message || err);
+    console.error('❌ Dropboxアップロード失敗:', err?.error || err?.message || err);
     return false;
   }
 }
@@ -76,23 +103,18 @@ async function downloadFromDropbox(dropboxPath) {
     const response = await client.filesDownload({ path: dropboxPath });
     const buffer = response.result.fileBinary;
     if (buffer) {
-      console.log(`✅ Dropboxからダウンロード成功: ${dropboxPath}`);
+      console.log('✅ Dropboxダウンロード成功: ' + dropboxPath);
       return Buffer.from(buffer).toString('utf-8');
     }
     return null;
   } catch (err) {
-    if (err.status === 409 && err.error?.error?.['.tag'] === 'path' && err.error.error.path['.tag'] === 'not_found') {
-      console.warn(`Dropbox読み込み失敗: ファイルが見つかりません: ${dropboxPath}`);
+    if (err?.status === 409) {
+      console.warn('⚠️ Dropboxファイルが見つかりません: ' + dropboxPath);
       return null;
     }
-    console.error(`❌ Dropboxダウンロード失敗:`, err?.error || err?.message || err);
+    console.error('❌ Dropboxダウンロード失敗:', err?.error || err?.message || err);
     return null;
   }
 }
 
-module.exports = {
-  ensureDropboxInit,
-  ensureFolder,
-  uploadToDropbox,
-  downloadFromDropbox,
-};
+module.exports = { ensureDropboxInit, ensureFolder, uploadToDropbox, downloadFromDropbox };
