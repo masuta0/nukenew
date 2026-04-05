@@ -10,9 +10,9 @@ const AI_GLOBAL_COOLDOWN_SEC = 6;
 
 // 試すモデルの優先順（上から順に試す）
 const MODELS = [
-    'gemini-2.0-flash',
-    'gemini-1.5-flash',
-    'gemini-2.0-flash-lite',
+    'gemini-2.5-flash-lite',   // 元々動いていたモデル
+    'gemini-1.5-flash',        // フォールバック1
+    'gemini-2.0-flash-lite',   // フォールバック2
 ];
 
 const SYSTEM_INSTRUCTION = `
@@ -169,8 +169,8 @@ async function chat(prompt, userId) {
                     // レートリミット → 次のキーへ
                     continue;
                 }
-                if (status === 400) {
-                    // リクエスト自体が不正（モデル非対応など）→ 次のモデルへ
+                if (status === 400 || status === 404) {
+                    // モデル非対応・見つからない → 次のモデルへ
                     break;
                 }
                 // その他（503, timeout等）→ 次のキーで再試行
