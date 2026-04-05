@@ -77,7 +77,7 @@ async function addMessage(guildId, userId, client, activeRoleId) {
 }
 
 // -------------------- リセット --------------------
-async function resetMonthlyActivity() { monthlyActivity = {}; await saveActivity(); console.log('✅ 月間アクティビティリセット完了'); }
+async function resetMonthlyActivity(client) { monthlyActivity = {}; await saveActivity(); console.log('✅ 月間アクティビティリセット完了'); }
 async function resetWeeklyActivity() { weeklyActivity = {}; await saveActivity(); console.log('✅ 週間アクティビティリセット完了'); }
 
 // -------------------- ランキング取得 --------------------
