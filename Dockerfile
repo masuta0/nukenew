@@ -26,12 +26,18 @@ RUN if [ -f package-lock.json ]; then npm ci --omit=dev --legacy-peer-deps; else
 # Copy app sources
 COPY . .
 
-# --- 🚀 [FIXED] モデルファイルの自動ダウンロード (互換性重視) ---
-# 配列を使わず、シンプルな文字列ループに変更しました。これにより /bin/sh でも動作します。
+# --- 🚀 [FINAL FIX] モデルファイルの個別ダウンロード ---
+# ssd_mobilenetv1 だけは "-shard1" という名前である必要があるため、個別に処理します。
 RUN mkdir -p /app/utils/models && \
     MODEL_BASE_URL="https://raw.githubusercontent.com/justadudewhohacks/face-api.js/master/weights" && \
+    # 1. まずは共通の manifest.json を全てダウンロード
     for MODEL in ssd_mobilenetv1_model face_landmark_68_model face_recognition_model face_expression_model tiny_face_detector_model; do \
-        curl -L "${MODEL_BASE_URL}/${MODEL}-weights_manifest.json" -o "/app/utils/models/${MODEL}-weights_manifest.json" && \
+        curl -L "${MODEL_BASE_URL}/${MODEL}-weights_manifest.json" -o "/app/utils/models/${MODEL}-weights_manifest.json"; \
+    done && \
+    # 2. ssd_mobilenetv1 だけ特殊な名前 (-shard1) でダウンロード
+    curl -L "${MODEL_BASE_URL}/ssd_mobilenetv1_model-shard1" -o "/app/utils/models/ssd_mobilenetv1_model-shard1" && \
+    # 3. それ以外は標準の .bin でダウンロード
+    for MODEL in face_landmark_68_model face_recognition_model face_expression_model tiny_face_detector_model; do \
         curl -L "${MODEL_BASE_URL}/${MODEL}.bin" -o "/app/utils/models/${MODEL}.bin"; \
     done
 
