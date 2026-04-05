@@ -610,6 +610,39 @@ async function resetServerChannels(guild, feedbackChannel = null) {
     }
   }
 }
+async function lockChannels(interaction) {
+  const guild = interaction.guild;
+  if (!guild) {
+    return interaction.reply({ content: '❌ サーバー情報を取得できませんでした。', ephemeral: true });
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+
+  const everyoneRole = guild.roles.everyone;
+  let lockedCount = 0;
+  let failedCount = 0;
+
+  for (const channel of guild.channels.cache.values()) {
+    if (!channel.isTextBased || !channel.isTextBased()) continue;
+    try {
+      await channel.permissionOverwrites.edit(everyoneRole, {
+        SendMessages: false,
+      }, { reason: 'ロック: 管理者による全チャンネルロック' });
+      lockedCount++;
+    } catch (e) {
+      console.error(`lockChannels: チャンネル ${channel.name} のロックに失敗:`, e);
+      failedCount++;
+    }
+  }
+
+  await interaction.editReply({
+    content: `🔒 ${lockedCount}個のチャンネルをロックしました。${
+      failedCount > 0 ? ` (${failedCount}個のチャンネルは失敗)` : ''
+    }`,
+    ephemeral: true,
+  });
+}
+
 module.exports = {
   hasManageGuildPermission,
   backupServer,
@@ -618,4 +651,5 @@ module.exports = {
   clearMessages,
   addRoleToAll,
   resetServerChannels,
+  lockChannels,
 };
