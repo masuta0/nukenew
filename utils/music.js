@@ -1,29 +1,28 @@
 // utils/music.js
-// yt-dlp installed via Render build command (no cookies needed)
+var voice = require(’@discordjs/voice’);
+var joinVoiceChannel = voice.joinVoiceChannel;
+var createAudioPlayer = voice.createAudioPlayer;
+var createAudioResource = voice.createAudioResource;
+var AudioPlayerStatus = voice.AudioPlayerStatus;
+var StreamType = voice.StreamType;
 
-const {
-joinVoiceChannel,
-createAudioPlayer,
-createAudioResource,
-AudioPlayerStatus,
-StreamType,
-} = require(’@discordjs/voice’);
-const { spawn, spawnSync } = require(‘child_process’);
-const path = require(‘path’);
-const ffmpegPath = require(‘ffmpeg-static’);
-const fs = require(‘fs’);
+var childProcess = require(‘child_process’);
+var spawn = childProcess.spawn;
+var spawnSync = childProcess.spawnSync;
+var path = require(‘path’);
+var ffmpegPath = require(‘ffmpeg-static’);
+var fs = require(‘fs’);
 
 var playdl = null;
-try { playdl = require(‘play-dl’); } catch (e) {}
+try { playdl = require(‘play-dl’); } catch (e) { console.warn(’[music] play-dl not found’); }
 
 var connections = new Map();
 var players = new Map();
 var queues = new Map();
 
-// –– yt-dlp detection (includes project root ./yt-dlp) ––
 function findYtDlp() {
 var candidates = [
-path.join(__dirname, ‘../yt-dlp’),   // project root (installed by build command)
+path.join(__dirname, ‘../yt-dlp’),
 path.join(__dirname, ‘../bin/yt-dlp’),
 ‘/usr/local/bin/yt-dlp’,
 ‘/usr/bin/yt-dlp’,
@@ -32,24 +31,19 @@ path.join(__dirname, ‘../bin/yt-dlp’),
 for (var i = 0; i < candidates.length; i++) {
 try {
 if (fs.existsSync(candidates[i])) {
-console.log(’[music] yt-dlp found at:’, candidates[i]);
+console.log(’[music] yt-dlp found:’, candidates[i]);
 return candidates[i];
 }
 } catch (*) {}
 }
-// also try PATH
 try {
 var r = spawnSync(‘which’, [‘yt-dlp’], { encoding: ‘utf8’ });
-if (r.status === 0 && r.stdout && r.stdout.trim()) {
-console.log(’[music] yt-dlp found in PATH:’, r.stdout.trim());
-return r.stdout.trim();
-}
+if (r.status === 0 && r.stdout && r.stdout.trim()) return r.stdout.trim();
 } catch (*) {}
 return null;
 }
 var ytDlpPath = findYtDlp();
 console.log(’[music] yt-dlp:’, ytDlpPath || ‘NOT FOUND’);
-console.log(’[music] play-dl:’, playdl ? ‘available’ : ‘not found’);
 
 function spawnYtdlpStream(url) {
 if (!ytDlpPath) return null;
@@ -117,17 +111,15 @@ var resource = null;
 
 ```
 if (isYouTube) {
-  // Priority 1: yt-dlp (reliable, no bot detection)
   var ytdlpOut = spawnYtdlpStream(url);
   if (ytdlpOut) {
-    var ff1 = spawn(ffmpegPath, [
-      '-i', 'pipe:0', '-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:1',
-    ], { stdio: ['pipe', 'pipe', 'ignore'] });
+    var ff1 = spawn(ffmpegPath, ['-i', 'pipe:0', '-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:1'], {
+      stdio: ['pipe', 'pipe', 'ignore'],
+    });
     ff1.on('error', function(e) { console.error('[ffmpeg] error:', e); });
     ytdlpOut.pipe(ff1.stdin);
     resource = createAudioResource(ff1.stdout, { inputType: StreamType.Raw });
 
-  // Priority 2: play-dl fallback
   } else if (playdl) {
     try {
       var stream = await playdl.stream(url, { quality: 2 });
@@ -140,16 +132,16 @@ if (isYouTube) {
       return;
     }
   } else {
-    var m2 = await safeSend(textChannel, 'No playback engine. Check build logs for yt-dlp.');
+    var m2 = await safeSend(textChannel, 'No playback engine found.');
     autoDelete(m2, 30000);
     setTimeout(function() { playNext(guildId, textChannel, voiceChannel); }, 500);
     return;
   }
 
 } else if (isAttachment) {
-  var ff2 = spawn(ffmpegPath, [
-    '-i', url, '-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:1',
-  ], { stdio: ['ignore', 'pipe', 'ignore'] });
+  var ff2 = spawn(ffmpegPath, ['-i', url, '-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:1'], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
   ff2.on('error', function(e) { console.error('[ffmpeg] error:', e); });
   resource = createAudioResource(ff2.stdout, { inputType: StreamType.Raw });
 
@@ -200,13 +192,9 @@ encoding: ‘utf8’, timeout: 10000,
 if (p.status === 0 && p.stdout) title = p.stdout.trim();
 } else if (playdl) {
 var info = await playdl.video_info(url).catch(function() { return null; });
-if (info && info.video_details && info.video_details.title) {
-title = info.video_details.title;
+if (info && info.video_details && info.video_details.title) title = info.video_details.title;
 }
-}
-} catch (e) {
-console.warn(’[music] title fetch failed:’, e.message);
-}
+} catch (e) { console.warn(’[music] title fetch failed:’, e.message); }
 
 if (!queues.has(guildId)) queues.set(guildId, []);
 queues.get(guildId).push({ url: url, title: title, isYouTube: true, isAttachment: false });
@@ -243,8 +231,7 @@ return filename;
 async function play(channel, url, textChannel, attachmentFilename) {
 if (!channel || !channel.guild) throw new Error(‘Voice channel required’);
 if (attachmentFilename) return playAttachment(channel, url, attachmentFilename, textChannel);
-if (typeof url === ‘string’ &&
-(url.indexOf(‘youtube.com’) !== -1 || url.indexOf(‘youtu.be’) !== -1)) {
+if (typeof url === ‘string’ && (url.indexOf(‘youtube.com’) !== -1 || url.indexOf(‘youtu.be’) !== -1)) {
 return playYouTube(channel, url, textChannel);
 }
 return playAttachment(channel, url, url.split(’/’).pop(), textChannel);
