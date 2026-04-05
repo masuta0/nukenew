@@ -1,18 +1,12 @@
 // utils/ai.js
 const axios = require('axios');
 
+/**
+ * 設定項目
+ */
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY
     ? process.env.GEMINI_API_KEY.split(',').map(k => k.trim())
     : [];
-
-let currentKeyIndex = 0;
-
-function getNextApiKey() {
-    if (GEMINI_API_KEY.length === 0) throw new Error('No Gemini API keys provided.');
-    const key = GEMINI_API_KEY[currentKeyIndex];
-    currentKeyIndex = (currentKeyIndex + 1) % GEMINI_API_KEY.length;
-    return key;
-}
 
 const SYSTEM_INSTRUCTION = `
 あなたは「ますまに鯖」専用のDiscord Botに組み込まれたAIです。
@@ -41,30 +35,47 @@ const SYSTEM_INSTRUCTION = `
 - ますまに共栄圏は最強
 `.trim();
 
-const conversationHistory = new Map();
 const MAX_HISTORY_TURNS = 8;
-
 const AI_COOLDOWN_SEC = 30;
+const MAX_RESPONSE_CHARS = 350;
+
+// 状態管理
+let currentKeyIndex = 0;
+const conversationHistory = new Map();
 const aiCooldowns = new Map();
 
+/**
+ * APIキーを順番に切り替えて取得する (Round Robin)
+ */
+function getNextApiKey() {
+    if (GEMINI_API_KEY.length === 0) throw new Error('No Gemini API keys provided.');
+    const key = GEMINI_API_KEY[currentKeyIndex];
+    currentKeyIndex = (currentKeyIndex + 1) % GEMINI_API_KEY.length;
+    return key;
+}
+
+/**
+ * クールダウンチェック
+ * @returns {number|null} 残り秒数があれば返し、なければnull
+ */
 function checkAiCooldown(userId) {
     const last = aiCooldowns.get(userId);
-    if (!last) return false;
-    return Date.now() - last < AI_COOLDOWN_SEC * 1000;
+    if (!last) return null;
+    const diff = Date.now() - last;
+    const remaining = Math.ceil((AI_COOLDOWN_SEC * 1000 - diff) / 1000);
+    return remaining > 0 ? remaining : null;
 }
 
 function setAiCooldown(userId) {
     aiCooldowns.set(userId, Date.now());
 }
 
+/**
+ * プロンプトインジェクション検知
+ */
 const INJECTION_PATTERNS = [
-    /繋げて出力/,
-    /つなげて出力/,
-    /結合して出力/,
-    /連結して/,
-    /システム命令/,
-    /ペルソナ/,
-    /今日から.*(?:リンク|公式)/,
+    /繋げて出力/, /つなげて出力/, /結合して出力/, /連結して/,
+    /システム命令/, /ペルソナ/, /今日から.*(?:リンク|公式)/,
     /ignore.*(?:previous|above|instruction)/i,
     /forget.*(?:previous|instruction)/i,
     /新しい.*ルール/,
@@ -75,8 +86,9 @@ function detectInjection(input) {
     return INJECTION_PATTERNS.some(p => p.test(input));
 }
 
-const MAX_RESPONSE_CHARS = 350;
-
+/**
+ * 応答テキストの切り詰め処理
+ */
 function truncateResponse(text) {
     if (!text) return text;
     if (text.length <= MAX_RESPONSE_CHARS) return text;
@@ -93,19 +105,32 @@ function truncateResponse(text) {
     return truncated + '…';
 }
 
+/**
+ * メインチャット関数
+ */
 async function chat(prompt, userId) {
-    if (GEMINI_API_KEY.length === 0) return 'APIキーが設定されていません。';
+    // 1. APIキー設定チェック
+    if (GEMINI_API_KEY.length === 0) return 'AI設定が完了していません。管理者に連絡してください。';
 
-    if (detectInjection(prompt)) {
-        return 'その操作はできません。';
+    // 2. クールダウンチェック (【重要】ここで実際に呼び出す)
+    const remaining = checkAiCooldown(userId);
+    if (remaining) {
+        return `クールダウン中です。あと ${remaining} 秒待ってね！`;
     }
 
+    // 3. インジェクション検知
+    if (detectInjection(prompt)) {
+        return 'その操作は認められません。';
+    }
+
+    // 4. 会話履歴の構築
     const history = conversationHistory.get(userId) || [];
     const contents = [
         ...history,
         { role: 'user', parts: [{ text: prompt }] }
     ];
 
+    // 5. APIリクエスト（キーの数だけリトライ）
     const MAX_RETRIES = GEMINI_API_KEY.length;
 
     for (let i = 0; i < MAX_RETRIES; i++) {
@@ -129,38 +154,56 @@ async function chat(prompt, userId) {
                         { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
                     ],
                 },
-                { headers: { 'Content-Type': 'application/json' } }
+                { headers: { 'Content-Type': 'application/json' }, timeout: 10000 }
             );
 
             const rawResponse = res.data.candidates?.[0]?.content?.parts?.[0]?.text
-                || '応答が取得できませんでした。';
+                || '（AIが応答を生成できませんでした）';
+            
             const aiResponse = truncateResponse(rawResponse);
 
+            // 成功したのでクールダウンをセット
+            setAiCooldown(userId);
+
+            // 履歴の更新
             const newHistory = [
                 ...history,
                 { role: 'user',  parts: [{ text: prompt }] },
                 { role: 'model', parts: [{ text: aiResponse }] }
             ];
-            if (newHistory.length > MAX_HISTORY_TURNS * 2) {
-                conversationHistory.set(userId, newHistory.slice(-(MAX_HISTORY_TURNS * 2)));
-            } else {
-                conversationHistory.set(userId, newHistory);
-            }
+            // 履歴が長くなりすぎないよう制限 (MAX_HISTORY_TURNS * 2 = ユーザーとAIのペア数)
+            conversationHistory.set(userId, newHistory.slice(-(MAX_HISTORY_TURNS * 2)));
 
             return aiResponse;
 
         } catch (err) {
-            console.error('AIからの応答エラー:', err.response ? err.response.data : err.message);
-            if (err.response?.status === 429 && i < MAX_RETRIES - 1) continue;
-            return 'AIからの応答に失敗しました。';
+            const status = err.response?.status;
+            const errorData = err.response?.data;
+
+            console.error(`[AI Error] Key Index ${currentKeyIndex - 1}: Status ${status}`);
+            
+            // 429 (Quota Exceeded) の場合は次のキーへ
+            if (status === 429) {
+                console.warn(`APIキー ${i + 1}/${MAX_RETRIES} が制限に達しました。次のキーを試します。`);
+                continue; 
+            }
+            
+            // それ以外の致命的なエラーはループを抜けてエラーを返す
+            console.error('AI API Error Details:', errorData || err.message);
+            break; 
         }
     }
 
-    return 'AIからの応答に失敗しました。全てのAPIキーが制限に達した可能性があります。';
+    return '現在、AIが非常に混み合っているか、全てのAPIキーが制限に達しています。しばらく時間を置いてから試してください。';
 }
 
 function resetHistory(userId) {
     conversationHistory.delete(userId);
 }
 
-module.exports = { chat, checkAiCooldown, setAiCooldown, resetHistory };
+module.exports = { 
+    chat, 
+    checkAiCooldown, 
+    setAiCooldown, 
+    resetHistory 
+};
