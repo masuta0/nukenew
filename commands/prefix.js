@@ -1,3 +1,4 @@
+// commands/prefix.js
 const {
   hasManageGuildPermission,
   backupServer,
@@ -7,6 +8,7 @@ const {
   addRoleToAll,
   resetServerChannels,
 } = require("../utils/guild");
+const { PermissionFlagsBits } = require('discord.js');
 const {
   addMessage,
   getRanking,
@@ -25,54 +27,17 @@ const { autoDeleteMessage } = require('../utils/messaging');
 const CMD_PREFIX = "!";
 const cooldowns = new Map();
 const COOLDOWN_TIME = 10;
-
 const SERVER_COOLDOWN_TIME = 2;
 const serverCooldowns = new Map();
-
-const AUTO_DELETE_COMMANDS = [
-  "help", "ping", "ai", "クイズ", "英語", "天気"
-];
-
+const AUTO_DELETE_COMMANDS = ["help", "ping", "ai", "クイズ", "英語", "天気"];
 const AUTO_DELETE_SECONDS = 30;
-
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const helpMessage = `
 **このボットについて**
-
-- 🎶 音楽再生
-- 📝 AIチャット
-- 📚 クイズ
-- 🌤️ 天気情報
-- 🔨 サーバー管理
-- 🛡️ 荒らし対策
-
+- 🎶 音楽再生 / 📝 AIチャット / 📚 クイズ / 🌤️ 天気情報 / 🔨 サーバー管理 / 🛡️ 荒らし対策
 **コマンド一覧**
-| コマンド | 説明 |
-|---|---|
-| !help | ヘルプをDMで送信 |
-| !ping | 応答確認 |
-| !uptime | 稼働時間表示 |
-| !天気 [場所] | 天気取得 |
-| !クイズ | クイズ出題 |
-| !ai [内容] | AIチャット |
-| !英語(他言語) | 翻訳 |
-| !nuke | チャンネルNuke |
-| !join | VC参加 |
-| !play [URL/検索] | 音楽再生 |
-| !stop | 再生停止 |
-| !leave | VC退出 |
-| !backup | サーバーバックアップ |
-| !restore [ファイル名] | サーバー復元（ファイル名省略時はサーバーID） |
-| !addrole [ロール名] | 全ユーザーロール付与 |
-| !clear [数] [@ユーザー] | メッセージ削除 |
-| !ranking | 月間アクティブユーザーランキング |
-| !reset | サーバーのチャンネルをリセット（管理者限定） |
+!help | !ping | !uptime | !天気 | !クイズ | !ai | !英語 | !nuke | !join | !play | !stop | !leave | !backup | !restore | !addrole | !clear | !ranking | !reset
 `;
-
-const RANKING_BANNED_CHANNELS = [
-  '雑談',
-];
 
 module.exports = async function handlePrefixMessage(client, msg) {
   if (msg.author.bot) return;
@@ -82,26 +47,19 @@ module.exports = async function handlePrefixMessage(client, msg) {
   if (!content.startsWith(CMD_PREFIX)) return;
 
   autoDeleteMessage(msg, AUTO_DELETE_SECONDS);
-
   const args = content.slice(CMD_PREFIX.length).split(/\s+/);
   let cmd = args.shift()?.toLowerCase();
 
-  // !clear4 や !clear 4 など数字がコマンド名に直結している場合に対応
-  // 例: cmd="clear4" → cmd="clear", args=["4", ...]
   const numSuffixMatch = cmd?.match(/^([a-z\u3040-\u30ff\u4e00-\u9fff]+)(\d+)$/);
   if (numSuffixMatch) {
     cmd = numSuffixMatch[1];
     args.unshift(numSuffixMatch[2]);
   }
 
-  // サーバー全体クールダウン
   const lastServerUsed = serverCooldowns.get(msg.guild.id) || 0;
-  if (Date.now() - lastServerUsed < SERVER_COOLDOWN_TIME * 1000) {
-    return;
-  }
+  if (Date.now() - lastServerUsed < SERVER_COOLDOWN_TIME * 1000) return;
   serverCooldowns.set(msg.guild.id, Date.now());
 
-  // ユーザー個別クールダウン
   if (cooldowns.has(msg.author.id)) {
     const lastUsed = cooldowns.get(msg.author.id);
     if (Date.now() - lastUsed < COOLDOWN_TIME * 1000) return;
@@ -121,56 +79,49 @@ module.exports = async function handlePrefixMessage(client, msg) {
   }
 
   switch (cmd) {
-    case "help": {
+    case "help":
       await msg.author.send(helpMessage).catch(() => {});
-      const reply = await msg.reply("ヘルプをDMに送信しました。");
-      if (reply) autoDeleteMessage(reply, AUTO_DELETE_SECONDS);
+      await safeReplyAndDelete("ヘルプをDMに送信しました。");
       break;
-    }
-
-    case "ping": {
+    case "ping":
       await safeReplyAndDelete("Pong!");
       break;
-    }
-
-    case "uptime": {
+    case "uptime":
       const uptime = process.uptime();
-      const h = Math.floor(uptime / 3600);
-      const m = Math.floor((uptime % 3600) / 60);
-      const s = Math.floor(uptime % 60);
-      await safeReplyAndDelete(`稼働時間: ${h}時間${m}分${s}秒`);
+      await safeReplyAndDelete(`稼働時間: ${Math.floor(uptime/3600)}時間${Math.floor((uptime%3600)/60)}分${Math.floor(uptime%60)}秒`);
       break;
-    }
-
     case "天気": {
       const place = args[0] || "東京";
       const weather = await fetchWeather(place);
-      await safeReplyAndDelete(`${place}の天気: ${weather}`);
+      if (!weather) {
+        await safeReplyErrorAndDelete(`「${place}」の天気情報を取得できませんでした。地名を確認してください。`);
+      } else {
+        await safeReplyAndDelete(weather);
+      }
       break;
     }
-
-    case "クイズ": {
+    case "クイズ":
       await quizManager(msg.channel, msg.author);
       break;
-    }
-
     case "ai": {
       const input = args.join(" ");
       if (!input) {
         await safeReplyErrorAndDelete("AIに聞きたいことを入力してください。");
         return;
       }
-      if (checkAiCooldown(msg.author.id)) {
-        await safeReplyErrorAndDelete("AIはクールダウン中です。");
+      const cooldown = checkAiCooldown(msg.author.id);
+      if (cooldown) {
+        const msgText = cooldown.type === 'global' 
+          ? "AIが混み合っています。少し時間を置いてから試してね！" 
+          : `AIはクールダウン中です。あと ${cooldown.remaining} 秒待ってね！`;
+        await safeReplyErrorAndDelete(msgText);
         return;
       }
-      setAiCooldown(msg.author.id);
       const aiReply = await chat(input, msg.author.id);
       const reply = await msg.reply(aiReply).catch(() => null);
       if (reply) autoDeleteMessage(reply, AUTO_DELETE_SECONDS);
       break;
     }
-
     case "英語": {
       const input = args.join(" ");
       if (!input) {
@@ -182,188 +133,80 @@ module.exports = async function handlePrefixMessage(client, msg) {
       if (reply) autoDeleteMessage(reply, AUTO_DELETE_SECONDS);
       break;
     }
-
-    case "nuke": {
-      if (!hasManageGuildPermission(msg.member)) {
-        await safeReplyErrorAndDelete("権限がありません。");
-        return;
-      }
+    case "nuke":
+      if (!hasManageGuildPermission(msg.member)) return safeReplyErrorAndDelete("権限がありません。");
       await nukeChannel(msg.channel);
       break;
-    }
-
-    // ============================================
-    // 音楽コマンド
-    // ============================================
-    case "join": {
-      if (!msg.member?.voice?.channel) {
-        await safeReplyErrorAndDelete("VCに参加してください。");
-        return;
-      }
-
+    case "join":
+      if (!msg.member?.voice?.channel) return safeReplyErrorAndDelete("VCに参加してください。");
       try {
-        const music = require("../utils/music");
-        await music.joinVoice(msg.member.voice.channel);
-        const reply = await msg.reply(`✅ **${msg.member.voice.channel.name}** に参加しました！`);
-        if (reply) autoDeleteMessage(reply, AUTO_DELETE_SECONDS);
-      } catch (err) {
-        console.error("join command error:", err);
-        await safeReplyErrorAndDelete(`VC参加に失敗しました: ${err.message || String(err)}`);
-      }
+        const musicUtil = require("../utils/music");
+        await musicUtil.joinVoice(msg.member.voice.channel);
+        await safeReplyAndDelete(`✅ **${msg.member.voice.channel.name}** に参加しました！`);
+      } catch (err) { await safeReplyErrorAndDelete(`失敗: ${err.message}`); }
       break;
-    }
-
-    case "play": {
-      if (!msg.member?.voice?.channel) {
-        await safeReplyErrorAndDelete("VCに参加してください。");
-        return;
-      }
-
+    case "play":
+      if (!msg.member?.voice?.channel) return safeReplyErrorAndDelete("VCに参加してください。");
       const query = args.join(" ");
-      if (!query) {
-        await safeReplyErrorAndDelete("再生するURLまたは検索ワードを指定してください。");
-        return;
-      }
-
+      if (!query) return safeReplyErrorAndDelete("検索ワードを指定してください。");
       try {
-        const music = require("../utils/music");
-
-        // VCに参加
-        await music.joinVoice(msg.member.voice.channel);
-
-        // 音楽を再生 (VoiceChannel, url, textChannel)
-        const title = await music.play(msg.member.voice.channel, query, msg.channel);
-
-        // 成功メッセージ（キューに追加された場合はplayNext内で通知されるため不要だが念のため）
-        if (title) {
-          console.log(`✅ 再生/キュー追加: ${title}`);
-        }
-      } catch (err) {
-        console.error("play command error:", err);
-        await safeReplyErrorAndDelete(`再生に失敗しました: ${err.message || String(err)}`);
-      }
+        const musicUtil = require("../utils/music");
+        await musicUtil.joinVoice(msg.member.voice.channel);
+        await musicUtil.play(msg.member.voice.channel, query, msg.channel);
+      } catch (err) { await safeReplyErrorAndDelete(`失敗: ${err.message}`); }
       break;
-    }
-
-    case "stop": {
+    case "stop":
       try {
-        const music = require("../utils/music");
-        const stopped = music.stop(msg.guild.id);
-
-        if (stopped) {
-          const reply = await msg.reply("⏹️ 再生を停止しました。");
-          if (reply) autoDeleteMessage(reply, AUTO_DELETE_SECONDS);
-        } else {
-          await safeReplyErrorAndDelete("再生中の音楽がありません。");
-        }
-      } catch (e) {
-        console.error("stop error:", e);
-        await safeReplyErrorAndDelete("停止処理でエラーが発生しました。");
-      }
+        const musicUtil = require("../utils/music");
+        if (musicUtil.stop(msg.guild.id)) await safeReplyAndDelete("⏹️ 再生を停止しました。");
+        else await safeReplyErrorAndDelete("再生中の音楽がありません。");
+      } catch (e) { await safeReplyErrorAndDelete("停止エラー"); }
       break;
-    }
-
-    case "leave": {
+    case "leave":
       try {
-        const music = require("../utils/music");
-        const left = await music.leaveVoice(msg.guild.id);
-
-        if (left) {
-          const reply = await msg.reply("👋 VCから退出しました。");
-          if (reply) autoDeleteMessage(reply, AUTO_DELETE_SECONDS);
-        } else {
-          await safeReplyErrorAndDelete("VCに参加していません。");
-        }
-      } catch (e) {
-        console.error("leave error:", e);
-        await safeReplyErrorAndDelete("VC退出処理でエラーが発生しました。");
-      }
+        const musicUtil = require("../utils/music");
+        if (await musicUtil.leaveVoice(msg.guild.id)) await safeReplyAndDelete("👋 VCから退出しました。");
+        else await safeReplyErrorAndDelete("VCに参加していません。");
+      } catch (e) { await safeReplyErrorAndDelete("退出エラー"); }
       break;
-    }
-
-    // ============================================
-    // サーバー管理コマンド
-    // ============================================
-    case "backup": {
-      if (!hasManageGuildPermission(msg.member)) {
-        await safeReplyErrorAndDelete("権限がありません。");
-        return;
-      }
+    case "backup":
+      if (!hasManageGuildPermission(msg.member)) return safeReplyErrorAndDelete("権限がありません。");
       await backupServer(msg.guild);
-      const reply = await msg.reply("サーバーバックアップが完了しました。");
-      if (reply) autoDeleteMessage(reply, AUTO_DELETE_SECONDS);
+      await safeReplyAndDelete("サーバーバックアップが完了しました。");
       break;
-    }
-
-    case "restore": {
-      if (!hasManageGuildPermission(msg.member)) {
-        await safeReplyErrorAndDelete("権限がありません。");
-        return;
-      }
-      const filename = args[0];
-      await restoreServer(msg.guild, msg.channel, filename);
-      const reply = await msg.reply("サーバー復元が完了しました。");
-      if (reply) autoDeleteMessage(reply, AUTO_DELETE_SECONDS);
+    case "restore":
+      if (!hasManageGuildPermission(msg.member)) return safeReplyErrorAndDelete("権限がありません。");
+      if (!args[0]) return safeReplyErrorAndDelete("復元ファイル名を指定してください。");
+      await restoreServer(msg.guild, msg.channel, args[0]);
+      await safeReplyAndDelete("サーバー復元が完了しました。");
       break;
-    }
-
-    case "addrole": {
-      if (!hasManageGuildPermission(msg.member)) {
-        await safeReplyErrorAndDelete("権限がありません。");
-        return;
-      }
+    case "addrole":
+      if (!hasManageGuildPermission(msg.member)) return safeReplyErrorAndDelete("権限がありません。");
       const roleName = args.join(" ");
-      if (!roleName) {
-        await safeReplyErrorAndDelete("ロール名を指定してください。");
-        return;
-      }
+      if (!roleName) return safeReplyErrorAndDelete("ロール名を指定してください。");
       await addRoleToAll(msg.guild, roleName);
-      const reply = await msg.reply(`全ユーザーにロール「${roleName}」を付与しました。`);
-      if (reply) autoDeleteMessage(reply, AUTO_DELETE_SECONDS);
+      await safeReplyAndDelete(`全ユーザーにロール「${roleName}」を付与しました。`);
       break;
-    }
-
-    case "clear": {
-      if (!msg.member.permissions.has("MANAGE_MESSAGES")) {
-        await safeReplyErrorAndDelete("権限がありません。");
-        return;
-      }
+    case "clear":
+      if (!msg.member.permissions.has(PermissionFlagsBits.ManageMessages)) return safeReplyErrorAndDelete("権限がありません。");
       const amount = parseInt(args[0]);
-      if (isNaN(amount) || amount < 1) {
-        await safeReplyErrorAndDelete("削除数を指定してください。");
-        return;
-      }
+      if (isNaN(amount) || amount < 1) return safeReplyErrorAndDelete("削除数を指定してください。");
       const targetMember = msg.mentions.members.first() || null;
       await msg.delete().catch(() => {});
       await clearMessages(msg.channel, amount, msg.channel, targetMember);
       break;
-    }
-
-    case "ranking": {
-      const ranking = await getRanking(msg.guild);
-      if (!ranking.length) {
-        await safeReplyErrorAndDelete("今月のランキングデータはありません。");
-        return;
-      }
+    case "ranking":
+      const ranking = getRanking(msg.guild.id);
+      if (!ranking.length) return safeReplyErrorAndDelete("ランキングデータはありません。");
       const rankingStr = ranking.map((u, i) => `${i + 1}位 <@${u.userId}>: ${u.count}回`).join("\n");
-      const reply = await msg.reply(`**月間アクティブユーザーランキング**\n${rankingStr}`);
-      if (reply) autoDeleteMessage(reply, AUTO_DELETE_SECONDS);
+      await safeReplyAndDelete(`**月間アクティブユーザーランキング**\n${rankingStr}`);
       break;
-    }
-
-    case "reset": {
-      if (!hasManageGuildPermission(msg.member)) {
-        await safeReplyErrorAndDelete("権限がありません。");
-        return;
-      }
+    case "reset":
+      if (!hasManageGuildPermission(msg.member)) return safeReplyErrorAndDelete("権限がありません。");
       await resetServerChannels(msg.guild, msg.channel);
-      const reply = await msg.reply("サーバーのチャンネルをリセットしました。");
-      if (reply) autoDeleteMessage(reply, AUTO_DELETE_SECONDS);
+      await safeReplyAndDelete("サーバーのチャンネルをリセットしました。");
       break;
-    }
-
     default:
-      // 未定義コマンドは無視
       break;
   }
 };
