@@ -84,7 +84,15 @@ module.exports = async function handlePrefixMessage(client, msg) {
   autoDeleteMessage(msg, AUTO_DELETE_SECONDS);
 
   const args = content.slice(CMD_PREFIX.length).split(/\s+/);
-  const cmd = args.shift()?.toLowerCase();
+  let cmd = args.shift()?.toLowerCase();
+
+  // !clear4 や !clear 4 など数字がコマンド名に直結している場合に対応
+  // 例: cmd="clear4" → cmd="clear", args=["4", ...]
+  const numSuffixMatch = cmd?.match(/^([a-z\u3040-\u30ff\u4e00-\u9fff]+)(\d+)$/);
+  if (numSuffixMatch) {
+    cmd = numSuffixMatch[1];
+    args.unshift(numSuffixMatch[2]);
+  }
 
   // サーバー全体クールダウン
   const lastServerUsed = serverCooldowns.get(msg.guild.id) || 0;
@@ -184,15 +192,11 @@ module.exports = async function handlePrefixMessage(client, msg) {
       break;
     }
 
-    // ============================================
-    // 音楽コマンド
-    // ============================================
     case "join": {
       if (!msg.member?.voice?.channel) {
         await safeReplyErrorAndDelete("VCに参加してください。");
         return;
       }
-
       try {
         const music = require("../utils/music");
         await music.joinVoice(msg.member.voice.channel);
@@ -210,23 +214,15 @@ module.exports = async function handlePrefixMessage(client, msg) {
         await safeReplyErrorAndDelete("VCに参加してください。");
         return;
       }
-
       const query = args.join(" ");
       if (!query) {
         await safeReplyErrorAndDelete("再生するURLまたは検索ワードを指定してください。");
         return;
       }
-
       try {
         const music = require("../utils/music");
-
-        // VCに参加
         await music.joinVoice(msg.member.voice.channel);
-
-        // 音楽を再生 (VoiceChannel, url, textChannel)
         const title = await music.play(msg.member.voice.channel, query, msg.channel);
-
-        // 成功メッセージ（キューに追加された場合はplayNext内で通知されるため不要だが念のため）
         if (title) {
           console.log(`✅ 再生/キュー追加: ${title}`);
         }
@@ -241,7 +237,6 @@ module.exports = async function handlePrefixMessage(client, msg) {
       try {
         const music = require("../utils/music");
         const stopped = music.stop(msg.guild.id);
-
         if (stopped) {
           const reply = await msg.reply("⏹️ 再生を停止しました。");
           if (reply) autoDeleteMessage(reply, AUTO_DELETE_SECONDS);
@@ -259,7 +254,6 @@ module.exports = async function handlePrefixMessage(client, msg) {
       try {
         const music = require("../utils/music");
         const left = await music.leaveVoice(msg.guild.id);
-
         if (left) {
           const reply = await msg.reply("👋 VCから退出しました。");
           if (reply) autoDeleteMessage(reply, AUTO_DELETE_SECONDS);
@@ -273,9 +267,6 @@ module.exports = async function handlePrefixMessage(client, msg) {
       break;
     }
 
-    // ============================================
-    // サーバー管理コマンド
-    // ============================================
     case "backup": {
       if (!hasManageGuildPermission(msg.member)) {
         await safeReplyErrorAndDelete("権限がありません。");
@@ -355,7 +346,6 @@ module.exports = async function handlePrefixMessage(client, msg) {
     }
 
     default:
-      // 未定義コマンドは無視
       break;
   }
 };
