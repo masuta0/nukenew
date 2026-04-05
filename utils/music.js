@@ -45,16 +45,25 @@ function findYtDlp() {
 var ytDlpPath = findYtDlp();
 console.log('[music] yt-dlp:', ytDlpPath || 'NOT FOUND');
 
-function spawnYtdlpStream(url) {
+// Get direct audio URL from yt-dlp (more reliable than pipe)
+function getAudioUrl(videoUrl) {
   if (!ytDlpPath) return null;
   try {
-    var cp = spawn(ytDlpPath, ['-f', 'bestaudio', '-o', '-', url], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    cp.on('error', function(e) { console.error('[yt-dlp] error:', e.message); });
-    return cp.stdout;
+    var r = spawnSync(ytDlpPath, [
+      '-f', 'bestaudio',
+      '--get-url',
+      '--no-playlist',
+      videoUrl,
+    ], { encoding: 'utf8', timeout: 15000 });
+    if (r.status === 0 && r.stdout && r.stdout.trim()) {
+      var url = r.stdout.trim().split('\n')[0];
+      console.log('[music] got audio URL via yt-dlp');
+      return url;
+    }
+    if (r.stderr) console.warn('[yt-dlp] stderr:', r.stderr.slice(0, 200));
+    return null;
   } catch (e) {
-    console.error('[yt-dlp] spawn failed:', e);
+    console.error('[yt-dlp] getAudioUrl failed:', e.message);
     return null;
   }
 }
@@ -106,18 +115,37 @@ async function playNext(guildId, textChannel, voiceChannel) {
   var isYouTube = item.isYouTube;
   var isAttachment = item.isAttachment;
 
+  console.log('[music] playNext:', title, '| isYouTube:', isYouTube);
+
   try {
     var resource = null;
 
     if (isYouTube) {
-      var ytdlpOut = spawnYtdlpStream(url);
-      if (ytdlpOut) {
-        var ff1 = spawn(ffmpegPath, ['-i', 'pipe:0', '-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:1'], {
-          stdio: ['pipe', 'pipe', 'ignore'],
-        });
-        ff1.on('error', function(e) { console.error('[ffmpeg] error:', e); });
-        ytdlpOut.pipe(ff1.stdin);
-        resource = createAudioResource(ff1.stdout, { inputType: StreamType.Raw });
+      if (ytDlpPath) {
+        // Get direct audio stream URL from yt-dlp, then pass to ffmpeg
+        // This avoids pipe timing issues
+        var audioUrl = getAudioUrl(url);
+        if (audioUrl) {
+          console.log('[music] streaming via ffmpeg from audio URL');
+          var ff = spawn(ffmpegPath, [
+            '-reconnect', '1',
+            '-reconnect_streamed', '1',
+            '-reconnect_delay_max', '5',
+            '-i', audioUrl,
+            '-f', 's16le',
+            '-ar', '48000',
+            '-ac', '2',
+            'pipe:1',
+          ], { stdio: ['ignore', 'pipe', 'ignore'] });
+          ff.on('error', function(e) { console.error('[ffmpeg] error:', e); });
+          ff.on('close', function(code) { console.log('[ffmpeg] exited:', code); });
+          resource = createAudioResource(ff.stdout, { inputType: StreamType.Raw });
+        } else {
+          var m1 = await safeSend(textChannel, 'Failed to get audio URL from yt-dlp.');
+          autoDelete(m1, 30000);
+          setTimeout(function() { playNext(guildId, textChannel, voiceChannel); }, 500);
+          return;
+        }
 
       } else if (playdl) {
         try {
@@ -125,22 +153,22 @@ async function playNext(guildId, textChannel, voiceChannel) {
           resource = createAudioResource(stream.stream, { inputType: stream.type });
         } catch (pdErr) {
           console.error('[play-dl] error:', pdErr.message);
-          var m1 = await safeSend(textChannel, 'Stream error: ' + (pdErr.message || pdErr));
-          autoDelete(m1, 30000);
+          var m2 = await safeSend(textChannel, 'Stream error: ' + (pdErr.message || pdErr));
+          autoDelete(m2, 30000);
           setTimeout(function() { playNext(guildId, textChannel, voiceChannel); }, 500);
           return;
         }
       } else {
-        var m2 = await safeSend(textChannel, 'No playback engine found.');
-        autoDelete(m2, 30000);
+        var m3 = await safeSend(textChannel, 'No playback engine found.');
+        autoDelete(m3, 30000);
         setTimeout(function() { playNext(guildId, textChannel, voiceChannel); }, 500);
         return;
       }
 
     } else if (isAttachment) {
-      var ff2 = spawn(ffmpegPath, ['-i', url, '-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:1'], {
-        stdio: ['ignore', 'pipe', 'ignore'],
-      });
+      var ff2 = spawn(ffmpegPath, [
+        '-i', url, '-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:1',
+      ], { stdio: ['ignore', 'pipe', 'ignore'] });
       ff2.on('error', function(e) { console.error('[ffmpeg] error:', e); });
       resource = createAudioResource(ff2.stdout, { inputType: StreamType.Raw });
 
@@ -151,11 +179,12 @@ async function playNext(guildId, textChannel, voiceChannel) {
     var player = createAudioPlayer();
     player.on('error', async function(err) {
       console.error('[player] error:', err);
-      var m3 = await safeSend(textChannel, 'Player error: ' + err.message);
-      autoDelete(m3, 30000);
+      var m4 = await safeSend(textChannel, 'Player error: ' + err.message);
+      autoDelete(m4, 30000);
       setTimeout(function() { playNext(guildId, textChannel, voiceChannel); }, 1000);
     });
     player.on(AudioPlayerStatus.Idle, function() {
+      console.log('[music] track ended, playing next');
       setTimeout(function() { playNext(guildId, textChannel, voiceChannel); }, 250);
     });
 
@@ -164,14 +193,15 @@ async function playNext(guildId, textChannel, voiceChannel) {
     if (conn2) conn2.subscribe(player);
     players.set(guildId, player);
     player.play(resource);
+    console.log('[music] player.play() called for:', title);
 
-    var startMsg = await safeSend(textChannel, '\uD83C\uDFB5 ' + (title || url));
-    autoDelete(startMsg, 30000);
+    // Do not auto-delete the play start message
+    await safeSend(textChannel, '\uD83C\uDFB5 ' + (title || url));
 
   } catch (err) {
     console.error('[music] playNext error:', err);
-    var m4 = await safeSend(textChannel, 'Playback failed: ' + (err.message || err));
-    autoDelete(m4, 30000);
+    var m5 = await safeSend(textChannel, 'Playback failed: ' + (err.message || err));
+    autoDelete(m5, 30000);
     setTimeout(function() { playNext(guildId, textChannel, voiceChannel); }, 1000);
   }
 }
@@ -184,10 +214,10 @@ async function playYouTube(channel, url, textChannel) {
   var title = url;
   try {
     if (ytDlpPath) {
-      var p = spawnSync(ytDlpPath, ['--get-title', '--no-warnings', url], {
+      var p = spawnSync(ytDlpPath, ['--get-title', '--no-warnings', '--no-playlist', url], {
         encoding: 'utf8', timeout: 10000,
       });
-      if (p.status === 0 && p.stdout) title = p.stdout.trim();
+      if (p.status === 0 && p.stdout && p.stdout.trim()) title = p.stdout.trim();
     } else if (playdl) {
       var info = await playdl.video_info(url).catch(function() { return null; });
       if (info && info.video_details && info.video_details.title) title = info.video_details.title;
@@ -200,8 +230,10 @@ async function playYouTube(channel, url, textChannel) {
   var ps = players.get(guildId);
   var isPlaying = ps && ps.state && ps.state.status === AudioPlayerStatus.Playing;
   if (!isPlaying) {
+    console.log('[music] starting playback for:', title);
     playNext(guildId, textChannel, channel);
   } else {
+    // Auto-delete queue message after 30s
     var qMsg = await safeSend(textChannel, 'Queued: **' + title + '**');
     autoDelete(qMsg, 30000);
   }
