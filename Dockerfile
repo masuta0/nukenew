@@ -26,20 +26,21 @@ RUN if [ -f package-lock.json ]; then npm ci --omit=dev --legacy-peer-deps; else
 # Copy app sources
 COPY . .
 
-# --- 🚀 [ULTIMATE FIX] モデルファイルの完全ダウンロード ---
-# 1. モデル保存用ディレクトリを作成
+# --- 🚀 [ULTIMATE & FINAL] モデルファイルの完全網羅ダウンロード ---
 RUN mkdir -p /app/utils/models && \
     MODEL_BASE_URL="https://raw.githubusercontent.com/justadudewhohacks/face-api.js/master/weights" && \
-    # 2. 全ての manifest.json (設計図) をダウンロード
+    # 1. 全ての manifest.json (設計図) をダウンロード
     for MODEL in ssd_mobilenetv1_model face_landmark_68_model face_recognition_model face_expression_model tiny_face_detector_model; do \
         curl -L "${MODEL_BASE_URL}/${MODEL}-weights_manifest.json" -o "/app/utils/models/${MODEL}-weights_manifest.json"; \
     done && \
-    # 3. 【重要】ssd_mobilenetv1 は分割ファイル (shard1, shard2) の両方が必要
-    curl -L "${MODEL_BASE_URL}/ssd_mobilenetv1_model-shard1" -o "/app/utils/models/ssd_mobilenetv1_model-shard1" && \
-    curl -L "${MODEL_BASE_URL}/ssd_mobilenetv1_model-shard2" -o "/app/utils/models/ssd_mobilenetv1_model-shard2" && \
-    # 4. それ以外のモデルは標準の .bin ファイルをダウンロード
-    for MODEL in face_landmark_68_model face_recognition_model face_expression_model tiny_face_detector_model; do \
-        curl -L "${MODEL_BASE_URL}/${MODEL}.bin" -o "/app/utils/models/${MODEL}.bin"; \
+    # 2. 【分割ファイル対応】大型モデル 2つは shard1 と shard2 の両方をダウンロード
+    for LARGE_MODEL in ssd_mobilenetv1_model face_recognition_model; do \
+        curl -L "${MODEL_BASE_URL}/${LARGE_MODEL}-shard1" -o "/app/utils/models/${LARGE_MODEL}-shard1" && \
+        curl -L "${MODEL_BASE_URL}/${LARGE_MODEL}-shard2" -o "/app/utils/models/${LARGE_MODEL}-shard2"; \
+    done && \
+    # 3. 【単一ファイル対応】それ以外のモデルは .bin をダウンロード
+    for SMALL_MODEL in face_landmark_68_model face_expression_model tiny_face_detector_model; do \
+        curl -L "${MODEL_BASE_URL}/${SMALL_MODEL}.bin" -o "/app/utils/models/${SMALL_MODEL}.bin"; \
     done
 
 # Create necessary directories and set permissions
