@@ -42,21 +42,34 @@ const {
   updateActiveRoles,
 } = require('./utils/activity');
 
-// === 設定 ===
-const ACTIVE_ROLE_ID = '1425643672900472964';
+// === 設定 (環境変数から読み込み) ===
+const ACTIVE_ROLE_ID = process.env.ACTIVE_ROLE_ID;
 const TOKEN = process.env.TOKEN;
 const PORT = process.env.PORT || 3000;
 const WEEKLY_CHANNEL_ID = process.env.WEEKLY_CHANNEL_ID || null;
+const FACE_LOG_CHANNEL = process.env.FACE_LOG_CHANNEL; // バグ⑤修正：ハードコードを排除
+
+// 環境変数のチェック
+if (!TOKEN) {
+  console.error('❌ ERROR: TOKEN が .env に設定されていません。');
+  process.exit(1);
+}
+if (!ACTIVE_ROLE_ID) {
+  console.warn('⚠️ WARNING: ACTIVE_ROLE_ID が設定されていません。アクティブロール機能が正しく動作しない可能性があります。');
+}
+if (!FACE_LOG_CHANNEL) {
+  console.warn('⚠️ WARNING: FACE_LOG_CHANNEL が設定されていません。顔認識ログが送信されません。');
+}
 
 const APP_DATA_DIR = path.join(__dirname, 'app-data');
 if (!fs.existsSync(APP_DATA_DIR)) fs.mkdirSync(APP_DATA_DIR, { recursive: true });
 
 // === process-level safety handlers ===
 process.on('uncaughtException', (err) => {
-  console.error('uncaughtException:', err);
+  console.error('🚨 uncaughtException:', err);
 });
 process.on('unhandledRejection', (reason) => {
-  console.error('unhandledRejection:', reason);
+  console.error('🚨 unhandledRejection:', reason);
 });
 
 // === Discord Client ===
@@ -94,7 +107,7 @@ client.on('interactionCreate', async (interaction) => {
       } else {
         await verify.buttonHandler(interaction);
       }
-    } else if (interaction.isModalSubmit && interaction.isModalSubmit()) {
+    } else if (interaction.isModalSubmit()) {
       if (interaction.customId.startsWith('ticket_')) {
         await ticket.modalHandler(interaction);
       } else if (interaction.customId.startsWith('verify_')) {
@@ -106,16 +119,11 @@ client.on('interactionCreate', async (interaction) => {
   } catch (err) {
     console.error('interactionCreate error:', err);
     try {
+      const errorMsg = { content: '⚠️ エラーが発生しました。', ephemeral: true };
       if (interaction.deferred || interaction.replied) {
-        await interaction.followUp({
-          content: '⚠️ エラーが発生しました。',
-          ephemeral: true,
-        });
+        await interaction.followUp(errorMsg);
       } else {
-        await interaction.reply({
-          content: '⚠️ エラーが発生しました。',
-          ephemeral: true,
-        });
+        await interaction.reply(errorMsg);
       }
     } catch (e) {
       console.error('followUp/reply error:', e);
@@ -123,8 +131,8 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// === Readyイベント ===
-client.once('ready', async () => {
+// === Readyイベント (clientReady に変更して警告を解消) ===
+client.once('clientReady', async () => {
   console.log('Logged in as ' + client.user.tag);
 
   try {
@@ -132,21 +140,15 @@ client.once('ready', async () => {
     await initFaceRecognition();
     console.log('Face recognition initialized');
 
-    // Debug: check yt-dlp availability and PATH
+    // Debug: check yt-dlp availability
     try {
       const which = spawnSync('which', ['yt-dlp'], { encoding: 'utf8' });
-      console.log('DEBUG: which yt-dlp status=', which.status, 'stdout=', which.stdout && which.stdout.trim());
+      console.log('DEBUG: which yt-dlp status=', which.status, 'stdout=', which.stdout?.trim());
     } catch (e) {
       console.log('DEBUG: which yt-dlp failed:', e);
     }
-    console.log('DEBUG: process.env.PATH=', process.env.PATH);
-    try {
-      console.log('DEBUG: utils/music._hasYtDlp =', music._hasYtDlp);
-    } catch (e) {
-      console.log('DEBUG: failed to read music._hasYtDlp', e);
-    }
 
-    // デフォルト顔登録: ローカルの face.jpg を優先して登録する
+    // デフォルト顔登録
     try {
       const localFacePath = path.join(__dirname, 'face.jpg');
       if (fs.existsSync(localFacePath)) {
@@ -158,13 +160,10 @@ client.once('ready', async () => {
       }
     } catch (faceError) {
       console.error('Face registration failed:', faceError.message || faceError);
-      console.log('Skipping face registration...');
     }
 
-    // Dropbox初期化
+    // 各種初期化とデータロード
     await ensureDropboxInit();
-
-    // データロード
     await loadActivity();
     await loadLevelData();
     preloadQuizzes();
@@ -209,9 +208,7 @@ client.once('ready', async () => {
 async function handleFaceMatch(message) {
   try {
     await message.delete();
-  } catch (e) {
-    // ignore
-  }
+  } catch (e) {}
 
   const member = message.member;
   let timeoutResult = '❌ タイムアウト失敗';
@@ -229,7 +226,10 @@ async function handleFaceMatch(message) {
   }
 
   try {
-    const logChannel = await client.channels.fetch('1422418574730989638');
+    // バグ⑤修正：ハードコードされていた ID を環境変数から取得
+    if (!FACE_LOG_CHANNEL) throw new Error('FACE_LOG_CHANNEL is not defined in .env');
+    
+    const logChannel = await client.channels.fetch(FACE_LOG_CHANNEL);
     if (logChannel && logChannel.isTextBased()) {
       await logChannel.send({
         content:
@@ -242,28 +242,27 @@ async function handleFaceMatch(message) {
       });
     }
   } catch (logErr) {
-    console.error('📛 ログ送信エラー:', logErr);
+    console.error('📛 ログ送信エラー:', logErr.message || logErr);
   }
 
   console.log('🧹 類似顔画像を削除: ' + message.id);
 }
 
-// === メッセージ処理（統合版） ===
+// === メッセージ処理 ===
 client.on('messageCreate', async (message) => {
   try {
     if (message.author.bot) return;
 
-    // DM専用処理
     if (message.channel.type === ChannelType.DM) {
       await antiRaid.handleDirectMessage(message);
       return;
     }
 
-    // ギルドメッセージのみ以降の処理を行う
     if (!message.guild) return;
 
-    // 添付画像チェック
-    for (const attachment of message.attachments.values()) {
+    // 画像チェック
+    const attachments = message.attachments.values();
+    for (const attachment of attachments) {
       if (attachment.contentType?.startsWith('image/')) {
         if (await isSimilarFace(attachment.url)) {
           await handleFaceMatch(message);
@@ -272,7 +271,6 @@ client.on('messageCreate', async (message) => {
       }
     }
 
-    // 本文内画像リンクチェック
     const urls = message.content.match(/https?:\/\/[^\s]+/g) || [];
     for (const url of urls) {
       if (url.match(/\.(jpg|jpeg|png|webp)$/i)) {
@@ -283,18 +281,15 @@ client.on('messageCreate', async (message) => {
       }
     }
 
-    // アンチレイド処理
+    // 各種処理
     await antiRaid.handleMessage(message);
 
-    // アクティブロール処理
-    if (message.author.id) {
+    if (message.author.id && ACTIVE_ROLE_ID) {
       await addMessage(message.guild.id, message.author.id, client, ACTIVE_ROLE_ID);
     }
 
-    // レベルXP加算
     if (message.member) await addXp(message.member);
 
-    // プレフィックスコマンド処理
     await handlePrefixMessage(client, message);
 
   } catch (err) {
@@ -302,7 +297,7 @@ client.on('messageCreate', async (message) => {
   }
 });
 
-// === 毎月1日にアクティビティリセット ===
+// === 定期リセット ===
 cron.schedule('0 0 1 * *', async () => {
   try {
     await resetMonthlyActivity(client);
@@ -311,7 +306,7 @@ cron.schedule('0 0 1 * *', async () => {
   }
 });
 
-// === 追加イベントハンドラ ===
+// === イベントハンドラ ===
 client.on('messageUpdate', handleMessageUpdate);
 client.on('guildMemberAdd', handleMemberJoin);
 client.on('guildMemberRemove', onGuildMemberRemove);
@@ -321,5 +316,4 @@ client.on('roleUpdate', handleRoleUpdate);
 client.on('messageReactionAdd', handleReactionAdd);
 client.on('guildAuditLogEntryCreate', handleAuditLogEntry);
 
-// === ログイン ===
 client.login(TOKEN);
