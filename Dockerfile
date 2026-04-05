@@ -19,11 +19,11 @@ COPY package*.json ./
 RUN if [ -f package-lock.json ]; then npm ci --omit=dev --legacy-peer-deps; else npm install --omit=dev --legacy-peer-deps; fi
 
 # Copy app sources
+# 変更後
 COPY . .
-
-# Run as non-root user for safety
+RUN mkdir -p /app/data /app/app-data /app/logs && chown -R node:node /app
 USER node
-
 EXPOSE 3000
+
 
 CMD ["node", "index.js"]
