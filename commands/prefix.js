@@ -125,7 +125,6 @@ module.exports = async function handlePrefixMessage(client, msg) {
       const result = await translate(input, { to: "en" });
       const reply = await msg.reply(result.text).catch(() => null);
       if (reply) autoDeleteMessage(reply, AUTO_DELETE_SECONDS);
-      }
       break;
     }
     case "nuke":
@@ -161,7 +160,7 @@ module.exports = async function handlePrefixMessage(client, msg) {
       try {
         const musicUtil = require("../utils/music");
         if (await musicUtil.leaveVoice(msg.guild.id)) await safeReplyAndDelete("👋 VCから退出しました。");
-        else await safeReplyErrorAndDelete("退出エラー");
+        else await safeReplyErrorAndDelete("VCに参加していません。");
       } catch (e) { await safeReplyErrorAndDelete("退出エラー"); }
       break;
     case "backup":
@@ -170,7 +169,7 @@ module.exports = async function handlePrefixMessage(client, msg) {
       await safeReplyAndDelete("サーバーバックアップが完了しました。");
       break;
     case "restore":
-      if (!hasManageGuildLPermission(msg.member)) return safeReplyErrorAndDelete("権限がありません。");
+      if (!hasManageGuildPermission(msg.member)) return safeReplyErrorAndDelete("権限がありません。");
       if (!args[0]) return safeReplyErrorAndDelete("復元ファイル名を指定してください。");
       await restoreServer(msg.guild, msg.channel, args[0]);
       await safeReplyAndDelete("サーバー復元が完了しました。");
@@ -185,7 +184,7 @@ module.exports = async function handlePrefixMessage(client, msg) {
     case "clear":
       if (!msg.member.permissions.has("MANAGE_MESSAGES")) return safeReplyErrorAndDelete("権限がありません。");
       const amount = parseInt(args[0]);
-      if (isNaN(amount) || amount < 1) return safeReplyErrorAndDelete("C削除数を指定してください。");
+      if (isNaN(amount) || amount < 1) return safeReplyErrorAndDelete("削除数を指定してください。");
       const targetMember = msg.mentions.members.first() || null;
       await msg.delete().catch(() => {});
       await clearMessages(msg.channel, amount, msg.channel, targetMember);
@@ -200,6 +199,8 @@ module.exports = async function handlePrefixMessage(client, msg) {
       if (!hasManageGuildPermission(msg.member)) return safeReplyErrorAndDelete("権限がありません。");
       await resetServerChannels(msg.guild, msg.channel);
       await safeReplyAndDelete("サーバーのチャンネルをリセットしました。");
-    }
+      break;
+    default:
+      break;
   }
 };
