@@ -4,6 +4,7 @@ const {
   Routes,
   REST,
   PermissionFlagsBits,
+  MessageFlags,
 } = require("discord.js");
 
 const { chat } = require("../utils/ai");
@@ -122,7 +123,9 @@ async function handleSlashCommand(interaction) {
   // サーバー全体クールダウン判定
   const lastServerUsed = serverCooldowns.get(interaction.guild.id) || 0;
   if (Date.now() - lastServerUsed < SERVER_COOLDOWN_TIME * 1000) {
-    await interaction.reply({ content: "コマンドは少し待ってから実行してください。", ephemeral: true });
+    if (!interaction.replied && !interaction.deferred) {
+      await interaction.reply({ content: "コマンドは少し待ってから実行してください。", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
     return;
   }
   serverCooldowns.set(interaction.guild.id, Date.now());
@@ -155,7 +158,7 @@ async function handleSlashCommand(interaction) {
       const xpDisplay = nextXp ?? "MAX";
       await interaction.reply({
         content: `📊 ${targetUser.tag} のレベル: ${data.level}, XP: ${data.xp}/${xpDisplay}`,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     }
 
@@ -164,24 +167,24 @@ async function handleSlashCommand(interaction) {
       const level = interaction.options.getInteger("level");
       const xp = interaction.options.getInteger("xp");
       await setLevelAndXp(channel.guild.id, targetUser.id, level, xp);
-      await interaction.reply({ content: `✅ ${targetUser.tag} のレベルを ${level}, XPを ${xp} に設定しました`, ephemeral: true });
+      await interaction.reply({ content: `✅ ${targetUser.tag} のレベルを ${level}, XPを ${xp} に設定しました`, flags: MessageFlags.Ephemeral });
     }
 
     else if (commandName === "quiz") {
       if (quizManager && typeof quizManager.getQuestion === 'function') {
         const q = await quizManager.getQuestion();
-        await interaction.reply({ content: `クイズ: ${q.text}`, ephemeral: true });
+        await interaction.reply({ content: `クイズ: ${q.text}`, flags: MessageFlags.Ephemeral });
       } else if (typeof quizManager === 'function') {
         await interaction.deferReply({ ephemeral: true });
         await quizManager(interaction, interaction.user);
       } else {
-        await interaction.reply({ content: '⚠️ クイズ機能が未設定です。', ephemeral: true });
+        await interaction.reply({ content: '⚠️ クイズ機能が未設定です。', flags: MessageFlags.Ephemeral });
       }
     }
 
     else if (commandName === "mplay") {
       if (!interaction.member?.voice?.channel) {
-        return interaction.reply({ content: "VCに参加してください。", ephemeral: true });
+        return interaction.reply({ content: "VCに参加してください。", flags: MessageFlags.Ephemeral });
       }
 
       const url = interaction.options.getString("url");
@@ -199,31 +202,31 @@ async function handleSlashCommand(interaction) {
 
     else if (commandName === "mskip") {
       if (!interaction.member?.voice?.channel) {
-        return interaction.reply({ content: "VCに参加してください。", ephemeral: true });
+        return interaction.reply({ content: "VCに参加してください。", flags: MessageFlags.Ephemeral });
       }
 
       const guildId = interaction.guild.id;
       const queue = music.queues?.get?.(guildId);
 
       if (!queue || queue.length === 0) {
-        return interaction.reply({ content: "キューに曲がありません。", ephemeral: true });
+        return interaction.reply({ content: "キューに曲がありません。", flags: MessageFlags.Ephemeral });
       }
 
       const player = music.players?.get?.(guildId);
       if (player) {
         player.stop(); // これで次の曲に自動移行
-        await interaction.reply({ content: "⏭️ スキップしました。", ephemeral: true });
+        await interaction.reply({ content: "⏭️ スキップしました。", flags: MessageFlags.Ephemeral });
       } else {
-        await interaction.reply({ content: "再生中の曲がありません。", ephemeral: true });
+        await interaction.reply({ content: "再生中の曲がありません。", flags: MessageFlags.Ephemeral });
       }
     } 
 
     else if (commandName === "mstop") {
       const stopped = music.stop(interaction.guild.id);
       if (stopped) {
-        await interaction.reply({ content: "⏹️ 再生を停止しました。", ephemeral: true });
+        await interaction.reply({ content: "⏹️ 再生を停止しました。", flags: MessageFlags.Ephemeral });
       } else {
-        await interaction.reply({ content: "再生中の音楽がありません。", ephemeral: true });
+        await interaction.reply({ content: "再生中の音楽がありません。", flags: MessageFlags.Ephemeral });
       }
     } 
 
@@ -232,11 +235,11 @@ async function handleSlashCommand(interaction) {
       const player = music.players?.get?.(guildId);
 
       if (!player) {
-        return interaction.reply({ content: "再生中の音楽がありません。", ephemeral: true });
+        return interaction.reply({ content: "再生中の音楽がありません。", flags: MessageFlags.Ephemeral });
       }
 
       player.pause();
-      await interaction.reply({ content: "⏸️ 一時停止しました。", ephemeral: true });
+      await interaction.reply({ content: "⏸️ 一時停止しました。", flags: MessageFlags.Ephemeral });
     } 
 
     else if (commandName === "mresume") {
@@ -244,46 +247,46 @@ async function handleSlashCommand(interaction) {
       const player = music.players?.get?.(guildId);
 
       if (!player) {
-        return interaction.reply({ content: "再生中の音楽がありません。", ephemeral: true });
+        return interaction.reply({ content: "再生中の音楽がありません。", flags: MessageFlags.Ephemeral });
       }
 
       player.unpause();
-      await interaction.reply({ content: "▶️ 再開しました。", ephemeral: true });
+      await interaction.reply({ content: "▶️ 再開しました。", flags: MessageFlags.Ephemeral });
     }
 
     else if (commandName === "backup") {
       await interaction.deferReply({ ephemeral: true });
       await backupServer(interaction.guild);
-      await interaction.editReply({ content: '✅ バックアップ処理を実行しました。', ephemeral: true });
+      await interaction.editReply({ content: '✅ バックアップ処理を実行しました。', flags: MessageFlags.Ephemeral });
     }
     else if (commandName === "restore") {
       await interaction.deferReply({ ephemeral: true });
       await restoreServer(interaction.guild, interaction.channel);
-      await interaction.editReply({ content: '✅ リストア処理を実行しました。', ephemeral: true });
+      await interaction.editReply({ content: '✅ リストア処理を実行しました。', flags: MessageFlags.Ephemeral });
     }
     else if (commandName === "nuke") {
       await interaction.deferReply({ ephemeral: true });
       const newCh = await nukeChannel(interaction.channel);
-      await interaction.editReply({ content: `✅ チャンネルをNukeしました: <#${newCh.id}>`, ephemeral: true });
+      await interaction.editReply({ content: `✅ チャンネルをNukeしました: <#${newCh.id}>`, flags: MessageFlags.Ephemeral });
     }
     else if (commandName === "clear") {
       const amount = interaction.options.getInteger("amount");
       await interaction.deferReply({ ephemeral: true });
       const deleted = await clearMessages(interaction.channel, amount, interaction.channel);
-      await interaction.editReply({ content: `🧹 ${deleted}件のメッセージを削除しました。`, ephemeral: true });
+      await interaction.editReply({ content: `🧹 ${deleted}件のメッセージを削除しました。`, flags: MessageFlags.Ephemeral });
     }
     else if (commandName === "addroleall") {
       const role = interaction.options.getRole("role");
       if (!role) {
-        return interaction.reply({ content: '❌ ロールが指定されていません。', ephemeral: true });
+        return interaction.reply({ content: '❌ ロールが指定されていません。', flags: MessageFlags.Ephemeral });
       }
       const result = await addRoleToAll(interaction.guild, role);
 
       if (!result || !result.success) {
-        return interaction.reply({ content: `❌ 付与に失敗しました: ${result?.error || '不明なエラー'}`, ephemeral: true });
+        return interaction.reply({ content: `❌ 付与に失敗しました: ${result?.error || '不明なエラー'}`, flags: MessageFlags.Ephemeral });
       }
 
-      return interaction.reply({ content: `✅ 全ユーザーにロール「${role.name}」を付与しました。（付与数: ${result.count}）`, ephemeral: true });
+      return interaction.reply({ content: `✅ 全ユーザーにロール「${role.name}」を付与しました。（付与数: ${result.count}）`, flags: MessageFlags.Ephemeral });
     }
     else if (commandName === "lock") await lockChannels(interaction);
 
@@ -304,9 +307,9 @@ async function handleSlashCommand(interaction) {
       await interaction.deferReply({ ephemeral: true });
       const res = await createInvite(interaction.guild, interaction.channel, interaction.user);
       if (res.success) {
-        await interaction.editReply({ content: `🔗 あなた専用の招待リンク: ${res.url}`, ephemeral: true });
+        await interaction.editReply({ content: `🔗 あなた専用の招待リンク: ${res.url}`, flags: MessageFlags.Ephemeral });
       } else {
-        await interaction.editReply({ content: `❌ 招待リンクの作成に失敗しました: ${res.error || '不明なエラー'}`, ephemeral: true });
+        await interaction.editReply({ content: `❌ 招待リンクの作成に失敗しました: ${res.error || '不明なエラー'}`, flags: MessageFlags.Ephemeral });
       }
     }
 
@@ -315,9 +318,9 @@ async function handleSlashCommand(interaction) {
       await interaction.deferReply({ ephemeral: true });
       const res = await fetchInviteCount(interaction.guild, interaction.user);
       if (res.success) {
-        await interaction.editReply({ content: `📊 あなたの招待数: **${res.count}**\n\n詳細: ${JSON.stringify(res.details || {}, null, 2)}`, ephemeral: true });
+        await interaction.editReply({ content: `📊 あなたの招待数: **${res.count}**\n\n詳細: ${JSON.stringify(res.details || {}, null, 2)}`, flags: MessageFlags.Ephemeral });
       } else {
-        await interaction.editReply({ content: `❌ 招待数の取得に失敗しました: ${res.error || '不明なエラー'}`, ephemeral: true });
+        await interaction.editReply({ content: `❌ 招待数の取得に失敗しました: ${res.error || '不明なエラー'}`, flags: MessageFlags.Ephemeral });
       }
     }
 
@@ -325,12 +328,16 @@ async function handleSlashCommand(interaction) {
       // 未定義コマンドは無視
     }
   } catch (err) {
+    // 10062: 期限切れ、40060: 二重応答 → 無視
+    if (err.code === 10062 || err.code === 40060) return;
     console.error("❌ SlashCommand Error:", err);
-    if (interaction.replied || interaction.deferred) {
-      await interaction.editReply({ content: "❌ コマンド実行中にエラーが発生しました", ephemeral: true });
-    } else {
-      await interaction.reply({ content: "❌ コマンド実行中にエラーが発生しました", ephemeral: true });
-    }
+    try {
+      if (interaction.replied || interaction.deferred) {
+        await interaction.editReply({ content: "❌ コマンド実行中にエラーが発生しました" });
+      } else {
+        await interaction.reply({ content: "❌ コマンド実行中にエラーが発生しました", flags: MessageFlags.Ephemeral });
+      }
+    } catch {}
   }
 }
 
