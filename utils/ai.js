@@ -5,7 +5,7 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY
     ? process.env.GEMINI_API_KEY.split(',').map(k => k.trim()).filter(Boolean)
     : [];
 
-const AI_USER_COOLDOWN_SEC   = 15;
+const AI_USER_COOLDOWN_SEC   = 10;
 const AI_GLOBAL_COOLDOWN_SEC = 6;
 
 // 試すモデルの優先順（上から順に試す）

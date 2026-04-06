@@ -33,34 +33,42 @@ function loadDropboxCredentials() {
 }
 
 let dbx = null;
+let initPromise = null;
 
 async function ensureDropboxInit() {
   if (dbx) return dbx;
+  if (initPromise) return initPromise;
 
-  const creds = loadDropboxCredentials();
-  if (!creds || !creds.refreshToken) {
-    console.warn('⚠️ Dropbox認証情報が見つかりません。Dropbox機能はスキップされます。');
-    return null;
-  }
+  initPromise = (async () => {
+    const creds = loadDropboxCredentials();
+    if (!creds || !creds.refreshToken) {
+      console.warn('⚠️ Dropbox認証情報が見つかりません。Dropbox機能はスキップされます。');
+      return null;
+    }
 
-  try {
-    const dbxAuth = new DropboxAuth({
-      clientId:     creds.appKey,
-      clientSecret: creds.appSecret,
-      refreshToken: creds.refreshToken,
-      fetch,
-    });
+    try {
+      const dbxAuth = new DropboxAuth({
+        clientId:     creds.appKey,
+        clientSecret: creds.appSecret,
+        refreshToken: creds.refreshToken,
+        fetch,
+      });
 
-    await dbxAuth.refreshAccessToken();
-    console.log('✅ Dropboxアクセストークンを取得しました。');
+      await dbxAuth.refreshAccessToken();
+      console.log('✅ Dropboxアクセストークンを取得しました。');
 
-    dbx = new Dropbox({ auth: dbxAuth, fetch });
-    console.log('✅ Dropboxクライアントを初期化しました。');
-    return dbx;
-  } catch (e) {
-    console.error('❌ Dropbox初期化に失敗しました:', e?.error || e?.message || e);
-    return null;
-  }
+      dbx = new Dropbox({ auth: dbxAuth, fetch });
+      console.log('✅ Dropboxクライアントを初期化しました。');
+      return dbx;
+    } catch (e) {
+      console.error('❌ Dropbox初期化に失敗しました:', e?.error || e?.message || e);
+      return null;
+    } finally {
+      initPromise = null;
+    }
+  })();
+
+  return initPromise;
 }
 
 async function ensureFolder(folderPath) {

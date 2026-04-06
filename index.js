@@ -19,11 +19,12 @@ const { registerSlashCommands, handleSlashCommand, handleButtonInteraction } = r
 const handlePrefixMessage = require('./commands/prefix');
 const { chat } = require('./utils/ai');
 const { ensureDropboxInit } = require('./utils/storage');
+const { acquireSingletonLock, startSingletonHeartbeat } = require('./utils/singleton');
 const { preloadQuizzes } = require('./utils/quiz');
 const { addXp, loadData: loadLevelData } = require('./utils/level');
 const verify = require('./utils/verify');
 const ticket = require('./utils/ticket');
-const { setupWeekly, loadWeeklyData } = require('./utils/weeklyManager');
+const { setupWeekly, loadWeeklyData, handleMessage: handleWeeklyMessage } = require('./utils/weeklyManager');
 const antiRaid = require('./utils/anti-raid');
 const {
   handleMemberJoin,
@@ -90,6 +91,10 @@ const app = express();
 app.get('/', (req, res) => res.send('Bot is running'));
 app.listen(PORT, () => console.log('Server listening on port ' + PORT));
 
+// 同一 messageId の二重処理を防止（誤って複数回イベントが届くケース対策）
+const processedMessageIds = new Map();
+const MESSAGE_DEDUP_TTL_MS = 5 * 60 * 1000;
+
 client.on('interactionCreate', async (interaction) => {
   try {
     if (interaction.isChatInputCommand()) {
@@ -115,7 +120,7 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 // === 【修正】 高速・頑丈な ready イベント ===
-client.once('ready', async () => {
+client.once('clientReady', async () => {
   console.log('🚀 Bot logged in as ' + client.user.tag);
 
   const initTasks = [
@@ -196,6 +201,14 @@ async function handleFaceMatch(message) {
 client.on('messageCreate', async (message) => {
   try {
     if (message.author.bot) return;
+    const now = Date.now();
+    const processedAt = processedMessageIds.get(message.id);
+    if (processedAt && now - processedAt < MESSAGE_DEDUP_TTL_MS) return;
+    processedMessageIds.set(message.id, now);
+    for (const [id, ts] of processedMessageIds.entries()) {
+      if (now - ts > MESSAGE_DEDUP_TTL_MS) processedMessageIds.delete(id);
+    }
+
     if (message.channel.type === ChannelType.DM) {
       await antiRaid.handleDirectMessage(message);
       return;
@@ -223,6 +236,7 @@ client.on('messageCreate', async (message) => {
     }
 
     await antiRaid.handleMessage(message);
+    await handleWeeklyMessage(message, WEEKLY_CHANNEL_ID);
     if (message.author.id && ACTIVE_ROLE_ID) {
       await addMessage(message.guild.id, message.author.id, client, ACTIVE_ROLE_ID);
     }
@@ -254,4 +268,19 @@ client.on('channelUpdate', handleChannelUpdate);
 client.on('roleCreate', handleRoleCreate);
 client.on('roleDelete', handleRoleDelete);
 
-client.login(TOKEN);
+async function boot() {
+  const instanceId = `${process.env.HOSTNAME || 'local'}-${process.pid}`;
+  const lockResult = await acquireSingletonLock(instanceId);
+  if (!lockResult.acquired) {
+    console.warn(`⏸️ 別インスタンスが稼働中のためDiscordログインをスキップします: ${lockResult.reason}`);
+    return;
+  }
+  console.log(`🔒 Singleton lock 獲得: ${instanceId}`);
+  startSingletonHeartbeat(instanceId);
+  await client.login(TOKEN);
+}
+
+boot().catch((err) => {
+  console.error('❌ Boot failed:', err);
+  process.exit(1);
+});
