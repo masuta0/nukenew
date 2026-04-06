@@ -13,6 +13,11 @@ const blockedChannelIds = [
   '1422418642078928916',
   '1422418645945946122',
 ];
+const QUIZ_RESULT_DELETE_MS = 7000;
+
+function scheduleDeleteMessage(message, delayMs = QUIZ_RESULT_DELETE_MS) {
+  setTimeout(() => message.delete().catch(() => {}), delayMs);
+}
 
 function preloadQuizzes() {
   try {
@@ -149,21 +154,27 @@ async function quizManager(target, user = null, category = null) {
         endCollector.on('collect', async (j) => {
           if (j.customId === 'quiz_next') {
             await j.update({ content: resultText, components: [] });
+            scheduleDeleteMessage(msg, 1200);
             resolve('next');
           } else {
             await j.update({ content: resultText + '\nクイズを終了しました！', components: [] });
+            scheduleDeleteMessage(msg);
             resolve('end');
           }
         });
 
         endCollector.on('end', (_, reason) => {
-          if (reason === 'time') resolve('end');
+          if (reason === 'time') {
+            scheduleDeleteMessage(msg);
+            resolve('end');
+          }
         });
       });
 
       collector.on('end', async (_, reason) => {
         if (reason === 'time') {
           await msg.edit({ content: `⌛ 時間切れ！ 正解は **${currentQuiz.answer}** でした。`, components: [] }).catch(() => {});
+          scheduleDeleteMessage(msg);
           resolve('end');
         }
       });
