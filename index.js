@@ -90,6 +90,10 @@ const app = express();
 app.get('/', (req, res) => res.send('Bot is running'));
 app.listen(PORT, () => console.log('Server listening on port ' + PORT));
 
+// 同一 messageId の二重処理を防止（誤って複数回イベントが届くケース対策）
+const processedMessageIds = new Map();
+const MESSAGE_DEDUP_TTL_MS = 5 * 60 * 1000;
+
 client.on('interactionCreate', async (interaction) => {
   try {
     if (interaction.isChatInputCommand()) {
@@ -196,6 +200,14 @@ async function handleFaceMatch(message) {
 client.on('messageCreate', async (message) => {
   try {
     if (message.author.bot) return;
+    const now = Date.now();
+    const processedAt = processedMessageIds.get(message.id);
+    if (processedAt && now - processedAt < MESSAGE_DEDUP_TTL_MS) return;
+    processedMessageIds.set(message.id, now);
+    for (const [id, ts] of processedMessageIds.entries()) {
+      if (now - ts > MESSAGE_DEDUP_TTL_MS) processedMessageIds.delete(id);
+    }
+
     if (message.channel.type === ChannelType.DM) {
       await antiRaid.handleDirectMessage(message);
       return;
