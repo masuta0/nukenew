@@ -5,15 +5,13 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY
     ? process.env.GEMINI_API_KEY.split(',').map(k => k.trim()).filter(Boolean)
     : [];
 
-const AI_USER_COOLDOWN_SEC   = 15;
+const AI_USER_COOLDOWN_SEC   = 10;
 const AI_GLOBAL_COOLDOWN_SEC = 6;
 
 // 試すモデルの優先順（上から順に試す）
-const MODELS = [
-    'gemini-2.5-flash-lite',   // 元々動いていたモデル
-    'gemini-1.5-flash',        // フォールバック1
-    'gemini-2.0-flash-lite',   // フォールバック2
-];
+const MODELS = (process.env.GEMINI_MODELS
+    ? process.env.GEMINI_MODELS.split(',').map(m => m.trim()).filter(Boolean)
+    : ['gemini-2.5-flash-lite']);
 
 const SYSTEM_INSTRUCTION = `
 あなたは「ますまに鯖」専用のDiscord Botに組み込まれたAIです。
@@ -46,6 +44,7 @@ let currentKeyIndex = 0;
 const conversationHistory = new Map();
 const aiCooldowns = new Map();
 let lastGlobalCall = 0;
+let quotaBlockedUntil = 0;
 
 function getNextApiKey() {
     if (GEMINI_API_KEY.length === 0) throw new Error('APIキーが設定されていません。');
@@ -56,6 +55,9 @@ function getNextApiKey() {
 
 function checkAiCooldown(userId) {
     const now = Date.now();
+    if (now < quotaBlockedUntil) {
+        return { type: 'quota', remaining: Math.ceil((quotaBlockedUntil - now) / 1000) };
+    }
     const globalDiff = now - lastGlobalCall;
     if (globalDiff < AI_GLOBAL_COOLDOWN_SEC * 1000) {
         return { type: 'global', remaining: Math.ceil((AI_GLOBAL_COOLDOWN_SEC * 1000 - globalDiff) / 1000) };
@@ -124,6 +126,9 @@ async function chat(prompt, userId) {
 
     const cooldown = checkAiCooldown(userId);
     if (cooldown) {
+        if (cooldown.type === 'quota') {
+            return `今はAIの上限に達しています。あと ${cooldown.remaining} 秒ほど待ってね。`;
+        }
         return cooldown.type === 'global'
             ? '少し時間を置いてから試してね！'
             : `あと ${cooldown.remaining} 秒待ってね！`;
@@ -166,6 +171,10 @@ async function chat(prompt, userId) {
                 console.error(`[AI] エラー model=${model} key[${i}] status=${status}: ${errBody}`);
 
                 if (status === 429) {
+                    const retrySecMatch = String(errBody).match(/Please retry in\\s*([\\d.]+)s/i);
+                    const retrySec = retrySecMatch ? Number(retrySecMatch[1]) : 15;
+                    const retryMs = Math.max(10 * 1000, Math.ceil(retrySec * 1000));
+                    quotaBlockedUntil = Math.max(quotaBlockedUntil, Date.now() + retryMs);
                     // レートリミット → 次のキーへ
                     continue;
                 }
