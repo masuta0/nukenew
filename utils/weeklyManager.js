@@ -39,6 +39,7 @@ async function saveWeeklyData() {
  */
 async function handleMessage(message, weeklyChannelId) {
   if (!message.guild || !message.member || message.author.bot) return;
+  if (!weeklyChannelId) return;
 
   const key = `${message.guild.id}_${message.author.id}`;
   if (cooldowns.has(key)) return;
@@ -85,18 +86,23 @@ async function resetWeeklyChannel(client, weeklyChannelId) {
  * Botにイベント登録 & 自動リセット
  */
 function setupWeekly(client, weeklyChannelId) {
-  client.on('messageCreate', async (message) => {
-    await handleMessage(message, weeklyChannelId);
-  });
+  let lastResetMinute = null;
 
   // 1分ごとに日本時間チェック
   setInterval(async () => {
     const now = new Date();
     const jst = new Date(now.getTime() + 9 * 60 * 60 * 1000); // 日本時間
-    if (jst.getDay() === 0 && jst.getHours() === 23 && jst.getMinutes() === 59) {
+    const minuteKey = `${jst.getUTCFullYear()}-${jst.getUTCMonth()}-${jst.getUTCDate()}-${jst.getUTCHours()}-${jst.getUTCMinutes()}`;
+    if (
+      jst.getDay() === 0 &&
+      jst.getHours() === 23 &&
+      jst.getMinutes() === 59 &&
+      lastResetMinute !== minuteKey
+    ) {
+      lastResetMinute = minuteKey;
       await resetWeeklyChannel(client, weeklyChannelId);
     }
   }, 60 * 1000);
 }
 
-module.exports = { setupWeekly, loadWeeklyData, resetWeeklyChannel };
+module.exports = { setupWeekly, loadWeeklyData, resetWeeklyChannel, handleMessage };

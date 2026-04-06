@@ -31,6 +31,8 @@ const SERVER_COOLDOWN_TIME = 2;
 const serverCooldowns = new Map();
 const AUTO_DELETE_COMMANDS = ["help", "ping", "ai", "クイズ", "英語", "天気"];
 const AUTO_DELETE_SECONDS = 30;
+const processedPrefixMessages = new Map();
+const PREFIX_DEDUP_TTL_MS = 5 * 60 * 1000;
 
 const helpMessage = `
 **このボットについて**
@@ -45,6 +47,13 @@ module.exports = async function handlePrefixMessage(client, msg) {
 
   const content = (msg.content || "").trim();
   if (!content.startsWith(CMD_PREFIX)) return;
+  const now = Date.now();
+  const processedAt = processedPrefixMessages.get(msg.id);
+  if (processedAt && now - processedAt < PREFIX_DEDUP_TTL_MS) return;
+  processedPrefixMessages.set(msg.id, now);
+  for (const [id, ts] of processedPrefixMessages.entries()) {
+    if (now - ts > PREFIX_DEDUP_TTL_MS) processedPrefixMessages.delete(id);
+  }
 
   autoDeleteMessage(msg, AUTO_DELETE_SECONDS);
   const args = content.slice(CMD_PREFIX.length).split(/\s+/);
