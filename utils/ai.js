@@ -7,10 +7,10 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY
 const AI_USER_COOLDOWN_SEC   = 10;
 const AI_GLOBAL_COOLDOWN_SEC = 6;
 
-// モデルを安定している gemini-1.5-flash に変更
+// デフォルトは新しいFlash系を優先し、古いモデルはフォールバックとして残す
 const MODELS = (process.env.GEMINI_MODELS
     ? process.env.GEMINI_MODELS.split(',').map(m => m.trim()).filter(Boolean)
-    : ['gemini-1.5-flash']); 
+    : ['gemini-2.0-flash', 'gemini-1.5-flash']);
 
 const SYSTEM_INSTRUCTION = `
 あなたは「ますまに鯖」専用のDiscord Botです。
