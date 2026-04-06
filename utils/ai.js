@@ -7,9 +7,10 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY
 const AI_USER_COOLDOWN_SEC   = 10;
 const AI_GLOBAL_COOLDOWN_SEC = 6;
 
+// モデルを安定している gemini-1.5-flash に変更
 const MODELS = (process.env.GEMINI_MODELS
     ? process.env.GEMINI_MODELS.split(',').map(m => m.trim()).filter(Boolean)
-    : ['gemini-2.0-flash-lite']);
+    : ['gemini-1.5-flash']); 
 
 const SYSTEM_INSTRUCTION = `
 あなたは「ますまに鯖」専用のDiscord Botです。
@@ -37,20 +38,15 @@ const SYSTEM_INSTRUCTION = `
 const MAX_HISTORY_TURNS  = 8;
 const MAX_RESPONSE_CHARS = 350;
 const MAX_INPUT_CHARS    = 500; 
-const MAX_STORED_USERS   = 1000; // 最大1000ユーザー分まで履歴を保持
+const MAX_STORED_USERS   = 1000;
 
-// 標準のMapを使用（メモリリーク対策は後述の関数で実施）
 const conversationHistory = new Map();
 const aiCooldowns = new Map();
 let lastGlobalCall = 0;
 let quotaBlockedUntil = 0;
 
-/**
- * 履歴を保存する際、ユーザー数が上限を超えていたら古い順に削除する
- */
 function saveHistory(userId, history) {
     if (!conversationHistory.has(userId) && conversationHistory.size >= MAX_STORED_USERS) {
-        // Mapの最初の要素（最も古い）を削除
         const firstKey = conversationHistory.keys().next().value;
         conversationHistory.delete(firstKey);
     }
@@ -162,7 +158,6 @@ async function chat(prompt, userId) {
                     { role: 'user',  parts: [{ text: prompt }] },
                     { role: 'model', parts: [{ text: aiResponse }] },
                 ];
-                // Mapへの保存を専用関数経由にする
                 saveHistory(userId, newHistory.slice(-(MAX_HISTORY_TURNS * 2)));
 
                 return aiResponse;
@@ -170,14 +165,19 @@ async function chat(prompt, userId) {
             } catch (err) {
                 const status  = err.response?.status;
                 const errBody = err.response?.data?.error?.message || err.message;
-                console.error(`[AI] Error model=${model} key[${i}] status=${status}: ${errBody}`);
-
+                
                 if (status === 429) {
                     const retrySecMatch = String(errBody).match(/Please retry in\s*([\d.]+)s/i);
-                    const retrySec = retrySecMatch ? Number(retrySecMatch[1]) : 15;
-                    quotaBlockedUntil = Math.max(quotaBlockedUntil, Date.now() + Math.ceil(retrySec * 1000));
+                    const retrySec = retrySecMatch ? Number(retrySecMatch[1]) : 30;
+                    const waitMs = Math.ceil(retrySec * 1000);
+                    
+                    quotaBlockedUntil = Math.max(quotaBlockedUntil, Date.now() + waitMs);
+                    
+                    console.warn(`[AI] クォータ制限検知: ${model} key[${i}]. ${retrySec}秒間、AI機能を制限します。`);
                     continue;
                 }
+                
+                console.error(`[AI] Error model=${model} key[${i}] status=${status}: ${errBody}`);
                 if (status === 400 || status === 404) break; 
                 continue;
             }
