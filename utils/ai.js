@@ -8,10 +8,10 @@ const AI_USER_COOLDOWN_SEC   = 4;
 const AI_GLOBAL_COOLDOWN_SEC = 2;
 const MAX_QUOTA_BLOCK_SEC    = 8;
 
-// デフォルトは単一モデルで運用（必要時のみ環境変数で上書き）
+// デフォルトは新しいFlash系を優先し、古いモデルはフォールバックとして残す
 const MODELS = (process.env.GEMINI_MODELS
     ? process.env.GEMINI_MODELS.split(',').map(m => m.trim()).filter(Boolean)
-    : ['gemini-2.0-flash']);
+    : ['gemini-2.0-flash', 'gemini-1.5-flash']);
 
 const SYSTEM_INSTRUCTION = `
 あなたは「ますまに鯖」専用のDiscord Botです。
