@@ -4,13 +4,14 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY
     ? process.env.GEMINI_API_KEY.split(',').map(k => k.trim()).filter(Boolean)
     : [];
 
-const AI_USER_COOLDOWN_SEC   = 10;
-const AI_GLOBAL_COOLDOWN_SEC = 6;
+const AI_USER_COOLDOWN_SEC   = 4;
+const AI_GLOBAL_COOLDOWN_SEC = 2;
+const MAX_QUOTA_BLOCK_SEC    = 8;
 
-// モデルを安定している gemini-1.5-flash に変更
+// デフォルトは単一モデルで運用（必要時のみ環境変数で上書き）
 const MODELS = (process.env.GEMINI_MODELS
     ? process.env.GEMINI_MODELS.split(',').map(m => m.trim()).filter(Boolean)
-    : ['gemini-1.5-flash']); 
+    : ['gemini-2.0-flash']);
 
 const SYSTEM_INSTRUCTION = `
 あなたは「ますまに鯖」専用のDiscord Botです。
@@ -44,6 +45,7 @@ const conversationHistory = new Map();
 const aiCooldowns = new Map();
 let lastGlobalCall = 0;
 let quotaBlockedUntil = 0;
+const unavailableModels = new Set();
 
 function saveHistory(userId, history) {
     if (!conversationHistory.has(userId) && conversationHistory.size >= MAX_STORED_USERS) {
@@ -144,6 +146,7 @@ async function chat(prompt, userId) {
     const contents = [...history, { role: 'user', parts: [{ text: prompt }] }];
 
     for (const model of MODELS) {
+        if (unavailableModels.has(model)) continue;
         for (let i = 0; i < GEMINI_API_KEY.length; i++) {
             const apiKey = GEMINI_API_KEY[i];
             try {
@@ -169,16 +172,20 @@ async function chat(prompt, userId) {
                 if (status === 429) {
                     const retrySecMatch = String(errBody).match(/Please retry in\s*([\d.]+)s/i);
                     const retrySec = retrySecMatch ? Number(retrySecMatch[1]) : 30;
-                    const waitMs = Math.ceil(retrySec * 1000);
+                    const waitMs = Math.ceil(Math.min(retrySec, MAX_QUOTA_BLOCK_SEC) * 1000);
                     
                     quotaBlockedUntil = Math.max(quotaBlockedUntil, Date.now() + waitMs);
                     
-                    console.warn(`[AI] クォータ制限検知: ${model} key[${i}]. ${retrySec}秒間、AI機能を制限します。`);
                     continue;
                 }
                 
+                if (status === 404) {
+                    unavailableModels.add(model);
+                    console.warn(`[AI] model=${model} は現在利用不可のためスキップします。`);
+                    break;
+                }
                 console.error(`[AI] Error model=${model} key[${i}] status=${status}: ${errBody}`);
-                if (status === 400 || status === 404) break; 
+                if (status === 400) break; 
                 continue;
             }
         }
