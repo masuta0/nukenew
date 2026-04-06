@@ -59,6 +59,7 @@ const TOKEN = process.env.TOKEN;
 const PORT = process.env.PORT || 3000;
 const WEEKLY_CHANNEL_ID = process.env.WEEKLY_CHANNEL_ID || null;
 const FACE_LOG_CHANNEL = process.env.FACE_LOG_CHANNEL;
+const SINGLETON_RETRY_MS = Number(process.env.BOT_SINGLETON_RETRY_MS || 10_000);
 
 if (!TOKEN) {
   console.error('❌ ERROR: TOKEN が .env に設定されていません。');
@@ -268,17 +269,56 @@ client.on('channelUpdate', handleChannelUpdate);
 client.on('roleCreate', handleRoleCreate);
 client.on('roleDelete', handleRoleDelete);
 
+let singletonHeartbeat = null;
+let singletonRetryTimer = null;
+let loginInFlight = false;
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function tryBootWithLock(instanceId) {
+  if (loginInFlight || client.isReady()) return false;
+  loginInFlight = true;
+  try {
+    const lockResult = await acquireSingletonLock(instanceId);
+    if (!lockResult.acquired) {
+      console.warn(`⏸️ 別インスタンスが稼働中のためDiscordログインをスキップします: ${lockResult.reason}`);
+      return false;
+    }
+
+    if (!singletonHeartbeat) {
+      console.log(`🔒 Singleton lock 獲得: ${instanceId}`);
+      singletonHeartbeat = startSingletonHeartbeat(instanceId);
+    }
+
+    await client.login(TOKEN);
+    return true;
+  } finally {
+    loginInFlight = false;
+  }
+}
+
 async function boot() {
   const instanceId = `${process.env.HOSTNAME || 'local'}-${process.pid}`;
-  const lockResult = await acquireSingletonLock(instanceId);
-  if (!lockResult.acquired) {
-    console.warn(`⏸️ 別インスタンスが稼働中のためDiscordログインをスキップします: ${lockResult.reason}`);
-    return;
-  }
-  console.log(`🔒 Singleton lock 獲得: ${instanceId}`);
-  startSingletonHeartbeat(instanceId);
-  await client.login(TOKEN);
+  const acquired = await tryBootWithLock(instanceId);
+  if (acquired) return;
+
+  console.log(`♻️ Singleton lock の再取得を ${SINGLETON_RETRY_MS}ms ごとに再試行します。`);
+  singletonRetryTimer = setInterval(async () => {
+    const won = await tryBootWithLock(instanceId);
+    if (won && singletonRetryTimer) {
+      clearInterval(singletonRetryTimer);
+      singletonRetryTimer = null;
+    }
+  }, SINGLETON_RETRY_MS);
 }
+
+process.on('SIGTERM', async () => {
+  if (singletonRetryTimer) clearInterval(singletonRetryTimer);
+  if (singletonHeartbeat) clearInterval(singletonHeartbeat);
+  await delay(100);
+});
 
 boot().catch((err) => {
   console.error('❌ Boot failed:', err);
