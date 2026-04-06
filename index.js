@@ -23,7 +23,7 @@ const { preloadQuizzes } = require('./utils/quiz');
 const { addXp, loadData: loadLevelData } = require('./utils/level');
 const verify = require('./utils/verify');
 const ticket = require('./utils/ticket');
-const { setupWeekly, loadWeeklyData } = require('./utils/weeklyManager');
+const { setupWeekly, loadWeeklyData, handleMessage: handleWeeklyMessage } = require('./utils/weeklyManager');
 const antiRaid = require('./utils/anti-raid');
 const {
   handleMemberJoin,
@@ -223,6 +223,7 @@ client.on('messageCreate', async (message) => {
     }
 
     await antiRaid.handleMessage(message);
+    await handleWeeklyMessage(message, WEEKLY_CHANNEL_ID);
     if (message.author.id && ACTIVE_ROLE_ID) {
       await addMessage(message.guild.id, message.author.id, client, ACTIVE_ROLE_ID);
     }
