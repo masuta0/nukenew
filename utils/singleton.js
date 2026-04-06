@@ -31,6 +31,10 @@ async function readLockState(client) {
 
 async function writeLockCAS(client, ownerId, previousRev = null) {
   const payload = { ownerId, updatedAt: now() };
+  return writeLockPayloadCAS(client, payload, previousRev);
+}
+
+async function writeLockPayloadCAS(client, payload, previousRev = null) {
   const mode = previousRev
     ? { '.tag': 'update', update: previousRev }
     : { '.tag': 'add' };
@@ -96,5 +100,6 @@ function startSingletonHeartbeat(instanceId) {
 module.exports = {
   acquireSingletonLock,
   refreshSingletonLock,
+  relinquishSingletonLock,
   startSingletonHeartbeat,
 };

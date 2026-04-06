@@ -19,7 +19,7 @@ const { registerSlashCommands, handleSlashCommand, handleButtonInteraction } = r
 const handlePrefixMessage = require('./commands/prefix');
 const { chat } = require('./utils/ai');
 const { ensureDropboxInit } = require('./utils/storage');
-const { acquireSingletonLock, startSingletonHeartbeat } = require('./utils/singleton');
+const { acquireSingletonLock, startSingletonHeartbeat, relinquishSingletonLock } = require('./utils/singleton');
 const { preloadQuizzes } = require('./utils/quiz');
 const { addXp, loadData: loadLevelData } = require('./utils/level');
 const verify = require('./utils/verify');
@@ -90,6 +90,10 @@ const client = new Client({
 const app = express();
 app.get('/', (req, res) => res.send('Bot is running'));
 app.listen(PORT, () => console.log('Server listening on port ' + PORT));
+
+let singletonInstanceId = null;
+let singletonHeartbeatTimer = null;
+let shuttingDown = false;
 
 // 同一 messageId の二重処理を防止（誤って複数回イベントが届くケース対策）
 const processedMessageIds = new Map();
@@ -278,10 +282,50 @@ async function boot() {
       return;
     }
     console.log(`🔒 Singleton lock 獲得: ${instanceId}`);
-    startSingletonHeartbeat(instanceId);
+    singletonInstanceId = instanceId;
+    singletonHeartbeatTimer = startSingletonHeartbeat(instanceId);
   }
   await client.login(TOKEN);
 }
+
+async function gracefulShutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`🛑 ${signal} を受信。シャットダウン処理を開始します。`);
+
+  if (singletonHeartbeatTimer) {
+    clearInterval(singletonHeartbeatTimer);
+    singletonHeartbeatTimer = null;
+  }
+
+  if (singletonInstanceId) {
+    const released = await relinquishSingletonLock(singletonInstanceId);
+    if (released) console.log(`🔓 Singleton lock を解放しました: ${singletonInstanceId}`);
+    else console.warn(`⚠️ Singleton lock 解放に失敗/不要: ${singletonInstanceId}`);
+  }
+
+  try {
+    if (client.isReady()) client.destroy();
+  } catch (err) {
+    console.warn('⚠️ Discord client shutdown 失敗:', err?.message || err);
+  }
+
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => {
+  gracefulShutdown('SIGTERM').catch((err) => {
+    console.error('❌ SIGTERM shutdown failed:', err);
+    process.exit(1);
+  });
+});
+
+process.on('SIGINT', () => {
+  gracefulShutdown('SIGINT').catch((err) => {
+    console.error('❌ SIGINT shutdown failed:', err);
+    process.exit(1);
+  });
+});
 
 boot().catch((err) => {
   console.error('❌ Boot failed:', err);
