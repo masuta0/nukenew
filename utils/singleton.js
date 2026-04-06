@@ -88,17 +88,6 @@ async function refreshSingletonLock(instanceId) {
   return writeLockCAS(dbx, instanceId, state.rev);
 }
 
-async function relinquishSingletonLock(instanceId) {
-  const dbx = await ensureDropboxInit();
-  if (!dbx) return false;
-
-  const state = await readLockState(dbx);
-  if (!state?.lock || state.lock.ownerId !== instanceId) return false;
-
-  const expiredPayload = { ownerId: instanceId, updatedAt: 0 };
-  return writeLockPayloadCAS(dbx, expiredPayload, state.rev);
-}
-
 function startSingletonHeartbeat(instanceId) {
   return setInterval(async () => {
     const ok = await refreshSingletonLock(instanceId);
