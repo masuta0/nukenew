@@ -19,6 +19,7 @@ const { registerSlashCommands, handleSlashCommand, handleButtonInteraction } = r
 const handlePrefixMessage = require('./commands/prefix');
 const { chat } = require('./utils/ai');
 const { ensureDropboxInit } = require('./utils/storage');
+const { acquireSingletonLock, startSingletonHeartbeat } = require('./utils/singleton');
 const { preloadQuizzes } = require('./utils/quiz');
 const { addXp, loadData: loadLevelData } = require('./utils/level');
 const verify = require('./utils/verify');
@@ -119,7 +120,7 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 // === 【修正】 高速・頑丈な ready イベント ===
-client.once('ready', async () => {
+client.once('clientReady', async () => {
   console.log('🚀 Bot logged in as ' + client.user.tag);
 
   const initTasks = [
@@ -267,4 +268,19 @@ client.on('channelUpdate', handleChannelUpdate);
 client.on('roleCreate', handleRoleCreate);
 client.on('roleDelete', handleRoleDelete);
 
-client.login(TOKEN);
+async function boot() {
+  const instanceId = `${process.env.HOSTNAME || 'local'}-${process.pid}`;
+  const lockResult = await acquireSingletonLock(instanceId);
+  if (!lockResult.acquired) {
+    console.warn(`⏸️ 別インスタンスが稼働中のためDiscordログインをスキップします: ${lockResult.reason}`);
+    return;
+  }
+  console.log(`🔒 Singleton lock 獲得: ${instanceId}`);
+  startSingletonHeartbeat(instanceId);
+  await client.login(TOKEN);
+}
+
+boot().catch((err) => {
+  console.error('❌ Boot failed:', err);
+  process.exit(1);
+});

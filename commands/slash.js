@@ -136,7 +136,7 @@ async function handleSlashCommand(interaction) {
     if (commandName === "ai") {
       const prompt = interaction.options.getString("prompt");
       await interaction.deferReply({ ephemeral: true });
-      const res = await chat(prompt);
+      const res = await chat(prompt, user.id);
       await interaction.editReply(res);
     }
 
