@@ -51,8 +51,9 @@ function getAudioUrl(videoUrl) {
   try {
     var r = spawnSync(ytDlpPath, [
       '-f', 'bestaudio',
-      '--get-url',
+      '--print', 'urls',
       '--no-playlist',
+      '--no-warnings',
       videoUrl,
     ], { encoding: 'utf8', timeout: 15000 });
     if (r.status === 0 && r.stdout && r.stdout.trim()) {
