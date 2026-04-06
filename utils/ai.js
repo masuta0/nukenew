@@ -1,5 +1,4 @@
 const axios = require('axios');
-const { LRUCache } = require('lru-cache'); // npm install lru-cache
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY
     ? process.env.GEMINI_API_KEY.split(',').map(k => k.trim()).filter(Boolean)
@@ -10,7 +9,7 @@ const AI_GLOBAL_COOLDOWN_SEC = 6;
 
 const MODELS = (process.env.GEMINI_MODELS
     ? process.env.GEMINI_MODELS.split(',').map(m => m.trim()).filter(Boolean)
-    : ['gemini-2.0-flash-lite']); // 最新モデルに更新推奨
+    : ['gemini-2.0-flash-lite']);
 
 const SYSTEM_INSTRUCTION = `
 あなたは「ますまに鯖」専用のDiscord Botです。
@@ -37,17 +36,26 @@ const SYSTEM_INSTRUCTION = `
 
 const MAX_HISTORY_TURNS  = 8;
 const MAX_RESPONSE_CHARS = 350;
-const MAX_INPUT_CHARS    = 500; // 入力上限を設けて負荷とインジェクションを防止
+const MAX_INPUT_CHARS    = 500; 
+const MAX_STORED_USERS   = 1000; // 最大1000ユーザー分まで履歴を保持
 
-// メモリリーク対策: 最大1000ユーザー分のみ保持し、古いものは自動削除
-const conversationHistory = new LRUCache({
-    max: 1000,
-    ttl: 1000 * 60 * 60, // 1時間で消去
-});
-
+// 標準のMapを使用（メモリリーク対策は後述の関数で実施）
+const conversationHistory = new Map();
 const aiCooldowns = new Map();
 let lastGlobalCall = 0;
 let quotaBlockedUntil = 0;
+
+/**
+ * 履歴を保存する際、ユーザー数が上限を超えていたら古い順に削除する
+ */
+function saveHistory(userId, history) {
+    if (!conversationHistory.has(userId) && conversationHistory.size >= MAX_STORED_USERS) {
+        // Mapの最初の要素（最も古い）を削除
+        const firstKey = conversationHistory.keys().next().value;
+        conversationHistory.delete(firstKey);
+    }
+    conversationHistory.set(userId, history);
+}
 
 function checkAiCooldown(userId) {
     const now = Date.now();
@@ -80,7 +88,7 @@ const INJECTION_PATTERNS = [
     /ignore.*(?:previous|above|instruction)/i,
     /forget.*(?:previous|instruction)/i,
     /新しい.*ルール/, /discord\s*\.\s*gg\s*[/／]/,
-    /base64/i, /hex/i, /decode/i // エンコードによる回避策を防止
+    /base64/i, /hex/i, /decode/i
 ];
 
 function detectInjection(input) {
@@ -124,7 +132,6 @@ async function chat(prompt, userId) {
         return 'AIのAPIキーが設定されていません。管理者に連絡してください。';
     }
 
-    // 入力文字数制限 (トークン爆弾・DoS対策)
     if (prompt.length > MAX_INPUT_CHARS) {
         return '入力が長すぎます。短くしてね！';
     }
@@ -142,7 +149,7 @@ async function chat(prompt, userId) {
 
     for (const model of MODELS) {
         for (let i = 0; i < GEMINI_API_KEY.length; i++) {
-            const apiKey = GEMINI_API_KEY[i]; // 直接インデックスで指定
+            const apiKey = GEMINI_API_KEY[i];
             try {
                 const rawText = await tryRequest(apiKey, model, contents);
                 if (!rawText) continue;
@@ -155,7 +162,8 @@ async function chat(prompt, userId) {
                     { role: 'user',  parts: [{ text: prompt }] },
                     { role: 'model', parts: [{ text: aiResponse }] },
                 ];
-                conversationHistory.set(userId, newHistory.slice(-(MAX_HISTORY_TURNS * 2)));
+                // Mapへの保存を専用関数経由にする
+                saveHistory(userId, newHistory.slice(-(MAX_HISTORY_TURNS * 2)));
 
                 return aiResponse;
 
