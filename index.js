@@ -283,13 +283,13 @@ loginInFlight = true;
 try {
 const lockResult = await acquireSingletonLock(instanceId);
 if (!lockResult.acquired) {
-console.warn(`⏸️ 別インスタンスが稼働中のためDiscordログインをスキップします: ${lockResult.reason}`);
-return false;
-}
 
 ```
+  return false;
+}
+
 if (!singletonHeartbeat) {
-  console.log(`🔒 Singleton lock 獲得: ${instanceId}`);
+
   singletonHeartbeat = startSingletonHeartbeat(instanceId);
 }
 
