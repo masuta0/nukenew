@@ -141,6 +141,7 @@ client.once('clientReady', async () => {
     { name: 'Slash Commands', fn: async () => { await registerSlashCommands(client); } },
   ];
 
+  console.log('⏳ Initializing all systems in parallel...');
   const results = await Promise.allSettled(initTasks.map(task => task.fn()));
 
   results.forEach((result, index) => {
@@ -299,7 +300,6 @@ async function boot() {
   const instanceId = `${process.env.HOSTNAME || 'local'}-${process.pid}`;
   const acquired = await tryBootWithLock(instanceId);
   if (acquired) return;
-
   singletonRetryTimer = setInterval(async () => {
     const won = await tryBootWithLock(instanceId);
     if (won && singletonRetryTimer) {
