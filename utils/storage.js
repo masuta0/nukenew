@@ -18,7 +18,6 @@ function loadDropboxCredentials() {
     if (fs.existsSync(tokenPath)) {
       const raw = JSON.parse(fs.readFileSync(tokenPath, 'utf8'));
       if (raw.refresh_token) {
-        console.log('📦 dropbox_token.json からDropbox認証情報を読み込みました。');
         return {
           appKey:       process.env.DROPBOX_APP_KEY    || '',
           appSecret:    process.env.DROPBOX_APP_SECRET || '',
@@ -55,10 +54,8 @@ async function ensureDropboxInit() {
       });
 
       await dbxAuth.refreshAccessToken();
-      console.log('✅ Dropboxアクセストークンを取得しました。');
 
       dbx = new Dropbox({ auth: dbxAuth, fetch });
-      console.log('✅ Dropboxクライアントを初期化しました。');
       return dbx;
     } catch (e) {
       console.error('❌ Dropbox初期化に失敗しました:', e?.error || e?.message || e);
@@ -96,7 +93,6 @@ async function uploadToDropbox(dropboxPath, contents) {
       contents,
       mode: { '.tag': 'overwrite' },
     });
-    console.log('✅ Dropboxアップロード成功: ' + dropboxPath);
     return true;
   } catch (err) {
     console.error('❌ Dropboxアップロード失敗:', err?.error || err?.message || err);
@@ -111,7 +107,6 @@ async function downloadFromDropbox(dropboxPath) {
     const response = await client.filesDownload({ path: dropboxPath });
     const buffer = response.result.fileBinary;
     if (buffer) {
-      console.log('✅ Dropboxダウンロード成功: ' + dropboxPath);
       return Buffer.from(buffer).toString('utf-8');
     }
     return null;
