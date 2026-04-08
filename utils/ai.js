@@ -8,7 +8,6 @@ const AI_USER_COOLDOWN_SEC   = 4;
 const AI_GLOBAL_COOLDOWN_SEC = 2;
 const MAX_QUOTA_BLOCK_SEC    = 8;
 
-// モデル名を2026年の安定版に固定。v1エンドポイントで確実に動作するリスト。
 const MODELS = (process.env.GEMINI_MODELS
     ? process.env.GEMINI_MODELS.split(',').map(m => m.trim()).filter(Boolean)
     : ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro']);
@@ -109,58 +108,57 @@ function truncateResponse(text) {
 }
 
 async function tryRequest(apiKey, model, contents) {
-    // 404対策として v1beta から v1 にURLを変更。
+    // 安定した v1 エンドポイントを使用
     const url = `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${apiKey}`;
     
-    const res = await axios.post(
-        url,
-        {
-            // v1ではsystemInstructionを明示的に指定。
-            systemInstruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
-            contents: contents,
-            generationConfig: { 
-                maxOutputTokens: 250, 
-                temperature: 0.7,
-                topP: 0.95,
+    // エラー回避のため、systemInstructionを独立させず、メッセージの冒頭に含める形式に変更
+    const payload = {
+        contents: [
+            {
+                role: "user",
+                parts: [{ text: `System Instruction: ${SYSTEM_INSTRUCTION}\n\n上記の指示に従って回答してください。` }]
             },
-        },
-        { headers: { 'Content-Type': 'application/json' }, timeout: 15000 }
-    );
+            {
+                role: "model",
+                parts: [{ text: "了解しました。ますまに共栄圏のBotとして、指示通り簡潔に回答します。" }]
+            },
+            ...contents
+        ],
+        generationConfig: { 
+            maxOutputTokens: 250, 
+            temperature: 0.7,
+            topP: 0.95,
+        }
+    };
+
+    const res = await axios.post(url, payload, { 
+        headers: { 'Content-Type': 'application/json' }, 
+        timeout: 15000 
+    });
     
     const candidate = res.data.candidates?.[0];
     const text = candidate?.content?.parts?.[0]?.text;
 
-    // AIからの応答が空だった場合、詳細をコンソールに出力する
     if (!text) {
-        console.error(`[AI Warning] ${model} からテキストが取得できません。`);
-        console.error(`FinishReason: ${candidate?.finishReason || '不明'}`);
-        if (candidate?.safetyRatings) {
-            console.error(`SafetyRatings:`, JSON.stringify(candidate.safetyRatings));
-        }
+        console.error(`[AI Warning] ${model} からの応答が空です。理由: ${candidate?.finishReason}`);
     }
 
     return text || null;
 }
 
 async function chat(prompt, userId) {
-    if (GEMINI_API_KEY.length === 0) {
-        return 'AIのAPIキーが設定されていません。管理者に連絡してください。';
-    }
-
-    if (prompt.length > MAX_INPUT_CHARS) {
-        return '入力が長すぎます。短くしてね！';
-    }
+    if (GEMINI_API_KEY.length === 0) return 'AIキーが未設定です。';
+    if (prompt.length > MAX_INPUT_CHARS) return '入力が長すぎます！';
 
     const cooldown = checkAiCooldown(userId);
     if (cooldown) {
-        if (cooldown.type === 'quota') return `今はAIの上限に達しています。あと ${cooldown.remaining} 秒ほど待ってね。`;
-        return cooldown.type === 'global' ? '少し時間を置いてから試してね！' : `あと ${cooldown.remaining} 秒待ってね！`;
+        if (cooldown.type === 'quota') return `制限中。あと ${cooldown.remaining} 秒。`;
+        return `あと ${cooldown.remaining} 秒待ってね。`;
     }
 
     if (detectInjection(prompt)) return 'その操作は認められません。';
 
     const history = conversationHistory.get(userId) || [];
-    // 履歴と現在のプロンプトを統合
     const contents = [...history, { role: 'user', parts: [{ text: prompt }] }];
 
     for (const model of MODELS) {
@@ -169,12 +167,7 @@ async function chat(prompt, userId) {
             const apiKey = GEMINI_API_KEY[i];
             try {
                 const rawText = await tryRequest(apiKey, model, contents);
-                
-                // ブロック等で空文字が返った場合は次の手段へ
-                if (!rawText) {
-                    console.warn(`[AI Skip] ${model} (Key Index: ${i}) の応答が空だったためスキップ。`);
-                    continue;
-                }
+                if (!rawText) continue;
 
                 const aiResponse = truncateResponse(rawText);
                 setAiCooldown(userId);
@@ -189,31 +182,24 @@ async function chat(prompt, userId) {
                 return aiResponse;
 
             } catch (err) {
-                const status  = err.response?.status;
+                const status = err.response?.status;
                 const errBody = err.response?.data?.error?.message || err.message;
-                
-                if (status === 429) {
-                    const retrySecMatch = String(errBody).match(/Please retry in\s*([\d.]+)s/i);
-                    const retrySec = retrySecMatch ? Number(retrySecMatch[1]) : 30;
-                    const waitMs = Math.ceil(Math.min(retrySec, MAX_QUOTA_BLOCK_SEC) * 1000);
-                    quotaBlockedUntil = Math.max(quotaBlockedUntil, Date.now() + waitMs);
-                    console.warn(`[AI] 429 Rate Limit - ${model} を一時停止。`);
-                    continue;
-                }
                 
                 if (status === 404) {
                     unavailableModels.add(model);
-                    console.error(`[AI Error] ${model} は404でアクセス不可。URLまたはモデル名を確認。`);
+                    console.error(`[AI Error] ${model} 404 - Skip`);
                     break;
                 }
-                
+                if (status === 429) {
+                    quotaBlockedUntil = Date.now() + 5000;
+                    continue;
+                }
                 console.error(`[AI Error] model=${model} status=${status}: ${errBody}`);
-                if (status === 400) break; // リクエスト形式ミスなら即中断
                 continue;
             }
         }
     }
-    return 'AIの応答に失敗しました。しばらく待ってから試してね。';
+    return 'AIの応答に失敗しました。少し待ってから試してね。';
 }
 
 function resetHistory(userId) { conversationHistory.delete(userId); }
