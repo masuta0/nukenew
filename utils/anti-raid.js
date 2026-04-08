@@ -63,7 +63,10 @@ const cfg = {
     AUDIT_ABUSE: 15,
     ACCOUNT_AGE: 10,
     RANDOM_STRING: 12,
-    ATTACHMENT_SPAM: 15, // 新機能: 添付ファイル連投
+    ATTACHMENT_SPAM: 15,
+    MASS_MENTION: 20,    // 大量メンション
+    DANGEROUS_FILE: 30,  // 危険なファイル（一発アウト）
+    BAD_NAME: 10,        // 悪意のある名前
   },
   night: {
     THRESHOLD: 30,
@@ -79,7 +82,10 @@ const cfg = {
     AUDIT_ABUSE: 15,
     ACCOUNT_AGE: 10,
     RANDOM_STRING: 12,
-    ATTACHMENT_SPAM: 15, // 新機能: 添付ファイル連投
+    ATTACHMENT_SPAM: 15,
+    MASS_MENTION: 20,
+    DANGEROUS_FILE: 30,
+    BAD_NAME: 10,
   }
 };
 function currentCfg() {
@@ -91,7 +97,7 @@ function currentCfg() {
 // ===== ルール定数 =====
 const RAID_MEMBER_THRESHOLD = 3;
 const RAID_TIME_WINDOW = 60 * 1000;
-const MASS_SPAM_THRESHOLD = 4;
+const MASS_SPAM_THRESHOLD = 7;     // 4→7 通常会話保護
 const MASS_SPAM_WINDOW = 5 * 1000;
 const TIMEOUT_MS = 3 * 60 * 1000;
 const MARK_EXPIRE_MS = 48 * 60 * 60 * 1000;
@@ -111,8 +117,8 @@ const GHOST_PING_SCORE = 15; // 新機能: ゴーストピン加算
 const SAME_USER_SPAM_DECAY = 0.5;
 
 // ランダム文字検知パラメータ
-const RANDOM_STRING_ENTROPY_THRESHOLD = 0.7;
-const RANDOM_STRING_MIN_LENGTH = 12;
+const RANDOM_STRING_ENTROPY_THRESHOLD = 0.78;  // 0.7→0.78 誤検知防止
+const RANDOM_STRING_MIN_LENGTH = 15;            // 12→15 短文は無視
 
 // 通常会話ワード（誤検知防止）
 const COMMON_WORDS = new Set([
@@ -133,6 +139,12 @@ const SHORTENER_SERVICES = [
   'bit.ly', 'tinyurl.com', 'goo.gl', 'ow.ly', 'is.gd', 'buff.ly',
   'adf.ly', 'shorte.st', 'bc.vc', 't.co', 'shorturl.at', 'rb.gy'
 ];
+
+// 危険なファイル拡張子
+const DANGEROUS_EXTENSIONS = ['.exe', '.bat', '.cmd', '.scr', '.vbs', '.pif', '.application', '.ps1', '.jar'];
+
+// 大量メンション閾値
+const MENTION_THRESHOLD = 5;
 
 // 危険権限
 const DANGEROUS_PERMISSIONS = [
@@ -257,12 +269,22 @@ function normalizeText(text) {
 // ★ ランダム文字列検出
 function isRandomString(text) {
   if (text.length < RANDOM_STRING_MIN_LENGTH) return false;
+
+  // 日本語文字（ひらがな・カタカナ・漢字）が含まれていれば通常会話とみなす
+  const japaneseChars = (text.match(/[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\u3400-\u4DBF]/g) || []).length;
+  if (japaneseChars >= 2) return false;
+
   const lower = text.toLowerCase();
   for (const word of COMMON_WORDS) if (lower.includes(word)) return false;
+
+  // ASCII文字のみを対象にエントロピー計算（日本語混じりは除外済み）
+  const asciiOnly = text.replace(/[^\x20-\x7E]/g, '');
+  if (asciiOnly.length < RANDOM_STRING_MIN_LENGTH) return false;
+
   const freq = {};
-  for (const ch of text) freq[ch] = (freq[ch] || 0) + 1;
+  for (const ch of asciiOnly) freq[ch] = (freq[ch] || 0) + 1;
   let entropy = 0;
-  const len = text.length;
+  const len = asciiOnly.length;
   for (const ch in freq) {
     const p = freq[ch] / len;
     entropy -= p * Math.log2(p);
@@ -270,9 +292,10 @@ function isRandomString(text) {
   const maxEntropy = Math.log2(Math.min(len, 95));
   const normalizedEntropy = entropy / maxEntropy;
   if (normalizedEntropy > RANDOM_STRING_ENTROPY_THRESHOLD) return true;
-  const onlyAlnum = /^[a-zA-Z0-9]+$/.test(text);
-  const vowelCount = (text.match(/[aeiouAEIOU]/g) || []).length;
-  if (onlyAlnum && vowelCount === 0 && text.length > 8) return true;
+
+  const onlyAlnum = /^[a-zA-Z0-9]+$/.test(asciiOnly);
+  const vowelCount = (asciiOnly.match(/[aeiouAEIOU]/g) || []).length;
+  if (onlyAlnum && vowelCount === 0 && asciiOnly.length > 8) return true;
   return false;
 }
 
@@ -416,6 +439,36 @@ async function restoreServerState(guild) {
   } catch {}
 }
 
+// ===== 荒らし確定時: 過去12時間のメッセージを一括削除 =====
+async function deleteRecentMessages(guild, userId, hoursBack = 12) {
+  const cutoff = Date.now() - hoursBack * 60 * 60 * 1000;
+  let totalDeleted = 0;
+  const textChannels = guild.channels.cache.filter(c => c.type === ChannelType.GuildText);
+  for (const [, channel] of textChannels) {
+    try {
+      // Discord の bulkDelete は 14 日以内のみ有効
+      const messages = await channel.messages.fetch({ limit: 100 }).catch(() => null);
+      if (!messages) continue;
+      const targets = messages.filter(m => m.author.id === userId && m.createdTimestamp >= cutoff);
+      if (targets.size === 0) continue;
+      if (targets.size === 1) {
+        await targets.first().delete().catch(() => {});
+        totalDeleted++;
+      } else {
+        await channel.bulkDelete(targets, true).catch(async () => {
+          // bulkDelete 失敗時は1件ずつ削除
+          for (const [, msg] of targets) {
+            await msg.delete().catch(() => {});
+            totalDeleted++;
+          }
+        });
+        totalDeleted += targets.size;
+      }
+    } catch {}
+  }
+  return totalDeleted;
+}
+
 // スコアによる処罰
 async function punishByScore(member, reason, channelName) {
   if (!member || isWhitelisted(member) || probationAdmins.has(member.id)) return;
@@ -432,12 +485,15 @@ async function punishByScore(member, reason, channelName) {
   if (score >= c.THRESHOLD) {
     try {
       await member.timeout(TIMEOUT_MS, reason);
-      await sendLogEmbed(member.guild, { title: '🚨 Timeout 適用', member, description: `理由: ${reason}\nスコア: ${score}`, channelName });
+      // 荒らし確定 → 過去12時間のメッセージを一括削除
+      const deleted = await deleteRecentMessages(member.guild, member.id, 12);
+      await sendLogEmbed(member.guild, { title: '🚨 Timeout 適用', member, description: `理由: ${reason}\nスコア: ${score}\n🗑️ 過去12時間のメッセージ ${deleted} 件を削除しました`, channelName });
       setScore(member.id, Math.floor(c.THRESHOLD * 0.5));
       markUser(member.id);
     } catch {
       await saveAndStripRoles(member);
-      await sendLogEmbed(member.guild, { title: '🚨 権限剥奪（代替）', member, description: `Timeout失敗: ${reason}`, channelName });
+      const deleted = await deleteRecentMessages(member.guild, member.id, 12);
+      await sendLogEmbed(member.guild, { title: '🚨 権限剥奪（代替）', member, description: `Timeout失敗: ${reason}\n🗑️ 過去12時間のメッセージ ${deleted} 件を削除しました`, channelName });
       markUser(member.id);
     }
   }
@@ -474,8 +530,8 @@ async function handleRandomStringSpam(message) {
   if (isRandomString(content)) {
     const c = currentCfg();
     const s = addScore(member.id, c.RANDOM_STRING);
-    await safeDelete(message, 'ランダム文字列連投');
-    await sendLogEmbed(guild, { title: '🚨 ランダム文字列検知', member, description: `+${c.RANDOM_STRING} / 現在 ${s}/${c.THRESHOLD}`, channelName: channel?.name, content });
+    // 検知時はメッセージを残す。荒らし確定時に一括削除される。
+    await sendLogEmbed(guild, { title: '⚠️ ランダム文字列検知', member, description: `+${c.RANDOM_STRING} / 現在 ${s}/${c.THRESHOLD}`, channelName: channel?.name, content });
     await applyEmergencySlowmode(channel, 10, 'ランダム文字連投');
     await punishByScore(member, 'ランダム文字列連投', channel?.name);
     return true;
@@ -568,7 +624,7 @@ async function handleAttachmentSpam(message) {
   if (recent.length >= 3) {
     const c = currentCfg();
     const s = addScore(uid, c.ATTACHMENT_SPAM);
-    await safeDelete(message, '添付ファイル連投');
+    // 検知時はメッセージを残す。荒らし確定時に一括削除される。
     await sendLogEmbed(guild, { title: '🚨 添付ファイル連投検知', member, description: `5秒以内に ${recent.length} 個のファイルを送信\n+${c.ATTACHMENT_SPAM} / 現在 ${s}/${c.THRESHOLD}`, channelName: channel?.name });
     await punishByScore(member, '添付ファイル連投', channel?.name);
     return true;
@@ -576,9 +632,96 @@ async function handleAttachmentSpam(message) {
   return false;
 }
 
-// ===== 短文連投スパム =====
+// ===== 【新機能A】大量メンションスパム検知 =====
+async function handleMassMention(message) {
+  const { member, guild, channel, mentions } = message;
+  if (!member || isWhitelisted(member)) return false;
+
+  const mentionCount = (mentions.users?.size || 0) + (mentions.roles?.size || 0);
+  // @everyone / @here は別途ゴーストピングで検知済みなので除外
+  if (!mentions.everyone && mentionCount >= MENTION_THRESHOLD) {
+    const scoreToAdd = mentionCount * 7;  // 1メンションにつき7点
+    const s = addScore(member.id, scoreToAdd);
+    // 大量メンションは即削除（被害防止）
+    await safeDelete(message, '大量メンションスパム');
+    await sendLogEmbed(guild, {
+      title: '🚨 大量メンションスパム検知',
+      member,
+      description: `1メッセージ内に ${mentionCount} 件のメンションが含まれていました。\n+${scoreToAdd} (${mentionCount}×7) / 現在 ${s}/${currentCfg().THRESHOLD}`,
+      channelName: channel?.name,
+      content: message.content,
+    });
+    await applyEmergencySlowmode(channel, 15, 'メンションスパム');
+    await punishByScore(member, '大量メンションスパム', channel?.name);
+    return true;
+  }
+  return false;
+}
+
+// ===== 【新機能B】危険なファイル（マルウェア・Token Grabber）検知 =====
+async function handleDangerousFiles(message) {
+  const { member, guild, channel, attachments } = message;
+  if (!member || isWhitelisted(member) || attachments.size === 0) return false;
+
+  for (const [, attachment] of attachments) {
+    const fileName = attachment.name?.toLowerCase() || '';
+    if (DANGEROUS_EXTENSIONS.some(ext => fileName.endsWith(ext))) {
+      const c = currentCfg();
+      const s = addScore(member.id, c.DANGEROUS_FILE);
+      // 危険なファイルは即削除
+      await safeDelete(message, '危険なファイルの送信');
+      await sendLogEmbed(guild, {
+        title: '🚨 危険なファイル（マルウェア疑い）を遮断',
+        member,
+        description: `送信されたファイル: \`${fileName}\`\nToken Grabberなどを防ぐため削除しました。\n+${c.DANGEROUS_FILE} / 現在 ${s}/${c.THRESHOLD}`,
+        channelName: channel?.name,
+      });
+      await punishByScore(member, '危険なファイルの送信', channel?.name);
+      return true;
+    }
+  }
+  return false;
+}
+
+// ===== 【新機能C】悪意のある名前・Hoisting 対策 =====
+async function handleBadNickname(member) {
+  if (!member || member.user.bot || isWhitelisted(member)) return;
+  const username = member.user.username.toLowerCase();
+  const displayName = member.displayName.toLowerCase();
+
+  const hasInvite = username.includes('discord.gg') || username.includes('.gg/') ||
+                    displayName.includes('discord.gg') || displayName.includes('.gg/');
+  // 記号始まり（!、#など）でメンバーリスト最上部に表示しようとするHoisting
+  const isHoisting = /^[^a-zA-Z0-9ぁ-んァ-ヶ一-龠]/.test(member.displayName);
+
+  if (hasInvite) {
+    const c = currentCfg();
+    const s = addScore(member.id, c.BAD_NAME);
+    await sendLogEmbed(member.guild, {
+      title: '⚠️ 悪意のあるユーザー名検知（招待リンク）',
+      member,
+      description: `名前に招待リンクが含まれています。\n+${c.BAD_NAME} / 現在 ${s}/${c.THRESHOLD}`,
+      color: 0xffa200,
+    });
+    if (member.manageable) {
+      await member.setNickname('Unverified User', '招待リンクを含む名前の強制変更').catch(() => {});
+    }
+    await punishByScore(member, '名前に招待リンクが含まれている', 'system');
+  } else if (isHoisting && member.manageable) {
+    // 先頭の記号だけ取り除く（"!!!たろう" → "たろう"）
+    const stripped = member.displayName.replace(/^[^a-zA-Z0-9ぁ-んァ-ヶ一-龠]+/, '').trim();
+    const newName = stripped.length >= 1 ? stripped : 'Moderated Name';
+    await member.setNickname(newName, 'Hoisting（記号始まり）対策').catch(() => {});
+    await sendLogEmbed(member.guild, {
+      title: '🔧 Hoisting対策: 先頭記号を除去しました',
+      member,
+      description: `\`${member.displayName}\` → \`${newName}\``,
+      color: 0x3498db,
+    });
+  }
+}
 const SHORT_MESSAGE_THRESHOLD = 20;
-const SHORT_MSG_SPAM_COUNT = 5;
+const SHORT_MSG_SPAM_COUNT = 8;     // 5→8 誤検知防止
 const SHORT_MSG_WINDOW = 10000;
 async function handleShortMessageSpam(message) {
   const { member, guild, content, channel } = message;
@@ -599,7 +742,7 @@ async function handleShortMessageSpam(message) {
     let added = c.MASS_SPAM;
     if (isSameUserSpam) added = Math.floor(added * 0.6);
     const s = addScore(uid, added, isSameUserSpam);
-    await safeDelete(message, '短文連投');
+    // 検知時はメッセージを残す。荒らし確定時に一括削除される。
     await sendLogEmbed(guild, { title: isSameUserSpam ? '⚠️ ノリ連投？ (軽減)' : '🚧 短文連投スパム', member, description: `${SHORT_MSG_WINDOW/1000}秒間に${recent.length}回\n+${added} / 現在 ${s}/${c.THRESHOLD}`, channelName: channel?.name, content });
     if (!isSameUserSpam) await applyEmergencySlowmode(channel, 5, '連投検知（軽減）');
     await punishByScore(member, '短文連投', channel?.name);
@@ -732,8 +875,8 @@ async function handleSimilarityDetection(message) {
       await sendLogEmbed(guild, { title: '🚨 類似メッセージ大量投稿（タイムアウト）', member, description: `類似度: ${SIMILARITY_PERCENT_THRESHOLD}%以上\n投稿回数: ${matchingData.count}\n参加ユーザー: ${matchingData.users.size}人`, channelName: channel?.name, color: 0xff0000, content });
       guildTracker.delete(matchingHash);
     } else if (matchingData.count >= SIMILARITY_DELETE_THRESHOLD) {
-      await safeDelete(message, '類似メッセージ反復投稿');
-      await sendLogEmbed(guild, { title: '⚠️ 類似メッセージ反復投稿（削除）', member, description: `類似度: ${SIMILARITY_PERCENT_THRESHOLD}%以上\n投稿回数: ${matchingData.count}\n参加ユーザー: ${matchingData.users.size}人`, channelName: channel?.name, color: 0xffa200, content });
+      // 閾値未満は削除しない（荒らし確定時に一括削除）
+      await sendLogEmbed(guild, { title: '⚠️ 類似メッセージ反復投稿（警告）', member, description: `類似度: ${SIMILARITY_PERCENT_THRESHOLD}%以上\n投稿回数: ${matchingData.count}\n参加ユーザー: ${matchingData.users.size}人`, channelName: channel?.name, color: 0xffa200, content });
     }
   }
 }
@@ -749,7 +892,7 @@ async function handlePersonalSimilarityDetection(message) {
   senders.set(uid, (senders.get(uid) || 0) + 1);
   if (senders.get(uid) >= 5) {
     const s = addScore(uid, currentCfg().SIMILAR);
-    await safeDelete(message, '類似メッセージ連投');
+    // 検知時はメッセージを残す。荒らし確定時に一括削除される。
     await sendLogEmbed(guild, { title: '🚧 類似メッセージ（個人）', member, description: `+${currentCfg().SIMILAR} / 現在 ${s}/${currentCfg().THRESHOLD}`, channelName: channel?.name, content });
     await punishByScore(member, '類似メッセージ連投', channel?.name);
   }
@@ -764,7 +907,9 @@ async function handleMessage(message) {
   if (await handleRandomStringSpam(message)) return;
   if (await handleObfuscatedLink(message)) return;
   if (await handleShortenedUrl(message)) return;
-  if (await handleAttachmentSpam(message)) return; // 【新機能3】
+  if (await handleDangerousFiles(message)) return;   // 【新機能B】危険なファイル
+  if (await handleMassMention(message)) return;       // 【新機能A】大量メンション
+  if (await handleAttachmentSpam(message)) return;
   await handleShortMessageSpam(message);
   if (await handleMultiAccountCommandAttack(message)) return;
   await handlePersonalCommandSpam(message);
@@ -780,7 +925,7 @@ async function handleMessage(message) {
   userMsgTs.set(uid, recent);
   if (recent.length >= MASS_SPAM_THRESHOLD) {
     const s = addScore(uid, c.MASS_SPAM, true);
-    await safeDelete(message, '連投');
+    // 検知時はメッセージを残す。荒らし確定時に一括削除される。
     await sendLogEmbed(message.guild, { title: '🚧 連投検知', member, description: `+${c.MASS_SPAM} / 現在 ${s}/${c.THRESHOLD}`, channelName: message.channel?.name, content: message.content });
     await applyEmergencySlowmode(message.channel, 5, '連投検知');
     return punishByScore(member, '連投', message.channel?.name);
@@ -796,7 +941,7 @@ async function handleMessage(message) {
     return punishByScore(member, '過度な改行', message.channel?.name);
   }
   const zalgo = (message.content.match(/[\u0300-\u036F\u1AB0-\u1AFF\u1DC0-\u1DFF\u20D0-\u20FF\uFE20-\uFE2F]/g) || []).length;
-  if (zalgo > 5) {
+  if (zalgo > 15) {  // 5→15 絵文字の結合文字による誤検知防止
     const s = addScore(uid, c.ZALGO);
     await safeDelete(message, 'Zalgo');
     await sendLogEmbed(message.guild, { title: '🚧 Zalgo乱用', member, description: `+${c.ZALGO} / ${s}`, channelName: message.channel?.name, content });
@@ -848,12 +993,16 @@ async function handleMemberJoin(member) {
     }
   }
 
-  // --- 初期スコア判定 (新機能) ---
+  // --- 悪意のある名前・Hoisting 対策 ---
+  await handleBadNickname(member);
+
+  // --- 初期スコア判定 ---
   let initialScore = 0;
   const age = now - member.user.createdAt.getTime();
-  if (age < 3 * 24 * 60 * 60 * 1000) initialScore += 15; // 3日以内
-  if (!member.user.avatar) initialScore += 10;           // アバターなし
-  if (!member.user.flags || member.user.flags.toArray().length === 0) initialScore += 5; // フラグなし
+  if (age < 1 * 24 * 60 * 60 * 1000) initialScore += 10;        // 1日以内（3日→1日、15→10）
+  else if (age < 7 * 24 * 60 * 60 * 1000) initialScore += 5;    // 1〜7日以内
+  if (!member.user.avatar) initialScore += 5;                    // アバターなし（10→5）
+  // フラグなしは削除（誤検知が多い）
 
   if (initialScore > 0) {
     const newScore = addScore(member.id, initialScore);
@@ -1364,4 +1513,8 @@ module.exports = {
   CLEANUP_INTERVAL_MS,
   cleanupSimilarityTracker,
   applyEmergencySlowmode,
+  handleMassMention,
+  handleDangerousFiles,
+  handleBadNickname,
+  deleteRecentMessages,
 };
