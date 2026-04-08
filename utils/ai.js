@@ -8,10 +8,10 @@ const AI_USER_COOLDOWN_SEC   = 4;
 const AI_GLOBAL_COOLDOWN_SEC = 2;
 const MAX_QUOTA_BLOCK_SEC    = 8;
 
-// デフォルトは新しいFlash系を優先し、古いモデルはフォールバックとして残す
+// モデル名を2026年の安定版に固定。v1エンドポイントで確実に動作するリスト。
 const MODELS = (process.env.GEMINI_MODELS
     ? process.env.GEMINI_MODELS.split(',').map(m => m.trim()).filter(Boolean)
-    : ['gemini-2.0-flash', 'gemini-1.5-flash-002', 'gemini-1.5-pro']);
+    : ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro']);
 
 const SYSTEM_INSTRUCTION = `
 あなたは「ますまに鯖」専用のDiscord Botです。
@@ -109,11 +109,15 @@ function truncateResponse(text) {
 }
 
 async function tryRequest(apiKey, model, contents) {
+    // 404対策として v1beta から v1 にURLを変更。
+    const url = `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${apiKey}`;
+    
     const res = await axios.post(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+        url,
         {
+            // v1ではsystemInstructionを明示的に指定。
             systemInstruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
-            contents,
+            contents: contents,
             generationConfig: { 
                 maxOutputTokens: 250, 
                 temperature: 0.7,
@@ -126,12 +130,12 @@ async function tryRequest(apiKey, model, contents) {
     const candidate = res.data.candidates?.[0];
     const text = candidate?.content?.parts?.[0]?.text;
 
-    // AIからの応答が空だった場合、理由をコンソールに出力する
+    // AIからの応答が空だった場合、詳細をコンソールに出力する
     if (!text) {
-        console.error(`[AI Warning] ${model} からテキストが取得できませんでした。`);
-        console.error(`理由 (finishReason): ${candidate?.finishReason || '不明'}`);
-        if (res.data.promptFeedback) {
-            console.error(`プロンプト評価:`, res.data.promptFeedback);
+        console.error(`[AI Warning] ${model} からテキストが取得できません。`);
+        console.error(`FinishReason: ${candidate?.finishReason || '不明'}`);
+        if (candidate?.safetyRatings) {
+            console.error(`SafetyRatings:`, JSON.stringify(candidate.safetyRatings));
         }
     }
 
@@ -156,6 +160,7 @@ async function chat(prompt, userId) {
     if (detectInjection(prompt)) return 'その操作は認められません。';
 
     const history = conversationHistory.get(userId) || [];
+    // 履歴と現在のプロンプトを統合
     const contents = [...history, { role: 'user', parts: [{ text: prompt }] }];
 
     for (const model of MODELS) {
@@ -165,9 +170,9 @@ async function chat(prompt, userId) {
             try {
                 const rawText = await tryRequest(apiKey, model, contents);
                 
-                // テキストが空だった場合、無言スキップせずにログを出して次の処理へ
+                // ブロック等で空文字が返った場合は次の手段へ
                 if (!rawText) {
-                    console.warn(`[AI Skip] ${model} の応答が空だったためスキップします。`);
+                    console.warn(`[AI Skip] ${model} (Key Index: ${i}) の応答が空だったためスキップ。`);
                     continue;
                 }
 
@@ -191,19 +196,19 @@ async function chat(prompt, userId) {
                     const retrySecMatch = String(errBody).match(/Please retry in\s*([\d.]+)s/i);
                     const retrySec = retrySecMatch ? Number(retrySecMatch[1]) : 30;
                     const waitMs = Math.ceil(Math.min(retrySec, MAX_QUOTA_BLOCK_SEC) * 1000);
-                    
                     quotaBlockedUntil = Math.max(quotaBlockedUntil, Date.now() + waitMs);
-                    
+                    console.warn(`[AI] 429 Rate Limit - ${model} を一時停止。`);
                     continue;
                 }
                 
                 if (status === 404) {
                     unavailableModels.add(model);
-                    console.error(`[AI] model=${model} 404 - モデルが存在しません。GEMINI_MODELSを確認してください。`);
+                    console.error(`[AI Error] ${model} は404でアクセス不可。URLまたはモデル名を確認。`);
                     break;
                 }
-                console.error(`[AI] Error model=${model} key[${i}] status=${status}: ${errBody}`);
-                if (status === 400) break; 
+                
+                console.error(`[AI Error] model=${model} status=${status}: ${errBody}`);
+                if (status === 400) break; // リクエスト形式ミスなら即中断
                 continue;
             }
         }
