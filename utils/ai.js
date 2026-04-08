@@ -122,7 +122,20 @@ async function tryRequest(apiKey, model, contents) {
         },
         { headers: { 'Content-Type': 'application/json' }, timeout: 15000 }
     );
-    return res.data.candidates?.[0]?.content?.parts?.[0]?.text || null;
+    
+    const candidate = res.data.candidates?.[0];
+    const text = candidate?.content?.parts?.[0]?.text;
+
+    // AIからの応答が空だった場合、理由をコンソールに出力する
+    if (!text) {
+        console.error(`[AI Warning] ${model} からテキストが取得できませんでした。`);
+        console.error(`理由 (finishReason): ${candidate?.finishReason || '不明'}`);
+        if (res.data.promptFeedback) {
+            console.error(`プロンプト評価:`, res.data.promptFeedback);
+        }
+    }
+
+    return text || null;
 }
 
 async function chat(prompt, userId) {
@@ -151,7 +164,12 @@ async function chat(prompt, userId) {
             const apiKey = GEMINI_API_KEY[i];
             try {
                 const rawText = await tryRequest(apiKey, model, contents);
-                if (!rawText) continue;
+                
+                // テキストが空だった場合、無言スキップせずにログを出して次の処理へ
+                if (!rawText) {
+                    console.warn(`[AI Skip] ${model} の応答が空だったためスキップします。`);
+                    continue;
+                }
 
                 const aiResponse = truncateResponse(rawText);
                 setAiCooldown(userId);
