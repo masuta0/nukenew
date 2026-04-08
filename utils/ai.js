@@ -11,7 +11,7 @@ const MAX_QUOTA_BLOCK_SEC    = 8;
 // デフォルトは新しいFlash系を優先し、古いモデルはフォールバックとして残す
 const MODELS = (process.env.GEMINI_MODELS
     ? process.env.GEMINI_MODELS.split(',').map(m => m.trim()).filter(Boolean)
-    : ['gemini-2.0-flash', 'gemini-1.5-flash-latest']);
+    : ['gemini-2.0-flash', 'gemini-1.5-flash']);
 
 const SYSTEM_INSTRUCTION = `
 あなたは「ますまに鯖」専用のDiscord Botです。
