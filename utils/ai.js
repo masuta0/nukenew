@@ -8,9 +8,10 @@ const AI_USER_COOLDOWN_SEC   = 4;
 const AI_GLOBAL_COOLDOWN_SEC = 2;
 const MAX_QUOTA_BLOCK_SEC    = 8;
 
+// モデル名に models/ プレフィックスを追加（404回避の最重要ポイント）
 const MODELS = (process.env.GEMINI_MODELS
     ? process.env.GEMINI_MODELS.split(',').map(m => m.trim()).filter(Boolean)
-    : ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro']);
+    : ['models/gemini-1.5-flash', 'models/gemini-1.5-pro', 'models/gemini-2.0-flash-exp']);
 
 const SYSTEM_INSTRUCTION = `
 あなたは「ますまに鯖」専用のDiscord Botです。
@@ -107,16 +108,15 @@ function truncateResponse(text) {
         : truncated + '…';
 }
 
-async function tryRequest(apiKey, model, contents) {
-    // 安定した v1 エンドポイントを使用
-    const url = `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${apiKey}`;
+async function tryRequest(apiKey, modelPath, contents) {
+    // 安定性の高い v1beta を使用しつつ、モデルパスを正しく組み立てる
+    const url = `https://generativelanguage.googleapis.com/v1beta/${modelPath}:generateContent?key=${apiKey}`;
     
-    // エラー回避のため、systemInstructionを独立させず、メッセージの冒頭に含める形式に変更
     const payload = {
         contents: [
             {
                 role: "user",
-                parts: [{ text: `System Instruction: ${SYSTEM_INSTRUCTION}\n\n上記の指示に従って回答してください。` }]
+                parts: [{ text: `命令: ${SYSTEM_INSTRUCTION}` }]
             },
             {
                 role: "model",
@@ -125,8 +125,8 @@ async function tryRequest(apiKey, model, contents) {
             ...contents
         ],
         generationConfig: { 
-            maxOutputTokens: 250, 
-            temperature: 0.7,
+            maxOutputTokens: 300, 
+            temperature: 0.8,
             topP: 0.95,
         }
     };
@@ -140,7 +140,7 @@ async function tryRequest(apiKey, model, contents) {
     const text = candidate?.content?.parts?.[0]?.text;
 
     if (!text) {
-        console.error(`[AI Warning] ${model} からの応答が空です。理由: ${candidate?.finishReason}`);
+        console.error(`[AI Warning] ${modelPath} の応答が空です。FinishReason: ${candidate?.finishReason}`);
     }
 
     return text || null;
@@ -148,25 +148,25 @@ async function tryRequest(apiKey, model, contents) {
 
 async function chat(prompt, userId) {
     if (GEMINI_API_KEY.length === 0) return 'AIキーが未設定です。';
-    if (prompt.length > MAX_INPUT_CHARS) return '入力が長すぎます！';
+    if (prompt.length > MAX_INPUT_CHARS) return 'プロンプトが長すぎます。';
 
     const cooldown = checkAiCooldown(userId);
     if (cooldown) {
-        if (cooldown.type === 'quota') return `制限中。あと ${cooldown.remaining} 秒。`;
-        return `あと ${cooldown.remaining} 秒待ってね。`;
+        if (cooldown.type === 'quota') return `制限中… あと ${cooldown.remaining} 秒待ってね。`;
+        return `あと ${cooldown.remaining} 秒待ってね！`;
     }
 
-    if (detectInjection(prompt)) return 'その操作は認められません。';
+    if (detectInjection(prompt)) return 'その操作は禁止されています。';
 
     const history = conversationHistory.get(userId) || [];
     const contents = [...history, { role: 'user', parts: [{ text: prompt }] }];
 
-    for (const model of MODELS) {
-        if (unavailableModels.has(model)) continue;
+    for (const modelPath of MODELS) {
+        if (unavailableModels.has(modelPath)) continue;
         for (let i = 0; i < GEMINI_API_KEY.length; i++) {
             const apiKey = GEMINI_API_KEY[i];
             try {
-                const rawText = await tryRequest(apiKey, model, contents);
+                const rawText = await tryRequest(apiKey, modelPath, contents);
                 if (!rawText) continue;
 
                 const aiResponse = truncateResponse(rawText);
@@ -186,20 +186,21 @@ async function chat(prompt, userId) {
                 const errBody = err.response?.data?.error?.message || err.message;
                 
                 if (status === 404) {
-                    unavailableModels.add(model);
-                    console.error(`[AI Error] ${model} 404 - Skip`);
+                    unavailableModels.add(modelPath);
+                    console.error(`[AI Error] ${modelPath} 404 - Not Found. URLを確認してください。`);
                     break;
                 }
                 if (status === 429) {
                     quotaBlockedUntil = Date.now() + 5000;
+                    console.warn(`[AI] 429 Rate Limit.`);
                     continue;
                 }
-                console.error(`[AI Error] model=${model} status=${status}: ${errBody}`);
+                console.error(`[AI Error] ${modelPath} status=${status}: ${errBody}`);
                 continue;
             }
         }
     }
-    return 'AIの応答に失敗しました。少し待ってから試してね。';
+    return 'AIの応答に失敗しました。少し時間を置いてみてね。';
 }
 
 function resetHistory(userId) { conversationHistory.delete(userId); }
