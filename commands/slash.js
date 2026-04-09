@@ -13,7 +13,7 @@ const verifySetup = require("../utils/verify");
 const { getLevelData, setLevelAndXp, calculateRequiredXp } = require("../utils/level");
 const { quizManager } = require("../utils/quiz");
 const music = require("../utils/music");
-const { backupServer, restoreServer, nukeChannel, clearMessages, addRoleToAll, lockChannels } = require("../utils/guild");
+const { backupServer, restoreServer, nukeChannel, clearMessages, addRoleToAll, lockChannels, unlockChannels } = require("../utils/guild");
 const ticket = require("../utils/ticket");
 const rolePanelCommands = require("./rolepanel");
 
@@ -69,6 +69,8 @@ const commands = [
     .addRoleOption(opt => opt.setName("role").setDescription("付与するロール").setRequired(true))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   new SlashCommandBuilder().setName("lock").setDescription("全チャンネルをロックします（管理者専用）")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  new SlashCommandBuilder().setName("unlock").setDescription("全チャンネルのロックを解除します（管理者専用）")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   // 認証パネル設置
@@ -289,6 +291,7 @@ async function handleSlashCommand(interaction) {
       return interaction.reply({ content: `✅ 全ユーザーにロール「${role.name}」を付与しました。（付与数: ${result.count}）`, flags: MessageFlags.Ephemeral });
     }
     else if (commandName === "lock") await lockChannels(interaction);
+    else if (commandName === "unlock") await unlockChannels(interaction);
 
     else if (commandName === "verifysetup") {
       await verifySetup.execute(interaction);
