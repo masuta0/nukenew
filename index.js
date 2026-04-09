@@ -48,6 +48,7 @@ const {
   handleBotAdd,
   handleGuildUpdate,
   handleChannelCreate,
+  handleChannelDelete,
   handleChannelUpdate,
   handleRoleCreate,
   handleRoleDelete,
@@ -264,6 +265,7 @@ client.on('guildAuditLogEntryCreate', handleAuditLogEntry);
 client.on('guildMemberAdd', handleBotAdd);
 client.on('guildUpdate', handleGuildUpdate);
 client.on('channelCreate', handleChannelCreate);
+client.on('channelDelete', handleChannelDelete);
 client.on('channelUpdate', handleChannelUpdate);
 client.on('roleCreate', handleRoleCreate);
 client.on('roleDelete', handleRoleDelete);
