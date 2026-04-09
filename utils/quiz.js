@@ -94,6 +94,7 @@ function buildQuizButtons(quiz) {
  */
 async function quizManager(target, user = null, category = null) {
   let channel, isSlash = false;
+  let originalMessage = null; // メッセージコマンドの場合の元メッセージ
 
   if (target.channel && typeof target.isChatInputCommand === 'function') {
     // スラッシュコマンド経由
@@ -102,7 +103,13 @@ async function quizManager(target, user = null, category = null) {
     user = target.user;
   } else {
     // メッセージ経由
-    channel = target;
+    channel = target.channel;
+    originalMessage = target;
+  }
+
+  // メッセージコマンドの場合、元のコマンドメッセージを即削除
+  if (!isSlash && originalMessage) {
+    originalMessage.delete().catch(() => {});
   }
 
   // 禁止チャンネルチェック（IDまたは名前で判定）
