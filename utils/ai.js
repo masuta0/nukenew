@@ -11,7 +11,7 @@ const MAX_QUOTA_BLOCK_SEC    = 8;
 // モデル名に models/ プレフィックスを追加（404回避の最重要ポイント）
 const MODELS = (process.env.GEMINI_MODELS
     ? process.env.GEMINI_MODELS.split(',').map(m => m.trim()).filter(Boolean)
-    : ['models/gemini-1.5-flash', 'models/gemini-1.5-pro', 'models/gemini-2.0-flash-exp']);
+    : ['models/gemini-2.0-flash', 'models/gemini-2.0-flash-lite', 'models/gemini-1.5-flash-latest']);
 
 const SYSTEM_INSTRUCTION = `
 あなたは「ますまに鯖」専用のDiscord Botです。
