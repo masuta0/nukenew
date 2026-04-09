@@ -109,8 +109,8 @@ module.exports = async function handlePrefixMessage(client, msg) {
       }
       break;
     }
-    case "クイズ":
-      await quizManager(msg.channel, msg.author);
+case "クイズ":
+  await quizManager(msg, msg.author);  // msg.channel → msg
       break;
     case "ai": {
       const input = args.join(" ");
