@@ -607,6 +607,7 @@ async function resetServerChannels(guild, feedbackChannel = null) {
     }
   }
 }
+
 async function lockChannels(interaction) {
   const guild = interaction.guild;
   if (!guild) {
@@ -640,6 +641,49 @@ async function lockChannels(interaction) {
   });
 }
 
+async function unlockChannels(interaction) {
+  const guild = interaction.guild;
+  if (!guild) {
+    return interaction.reply({ content: '❌ サーバー情報を取得できませんでした。', ephemeral: true });
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+
+  const everyoneRole = guild.roles.everyone;
+  let unlockedCount = 0;
+  let skippedCount = 0;
+  let failedCount = 0;
+
+  for (const channel of guild.channels.cache.values()) {
+    if (!channel.isTextBased || !channel.isTextBased()) continue;
+
+    // @everyone の SendMessages が明示的に deny されているチャンネルのみ対象
+    const overwrite = channel.permissionOverwrites.cache.get(everyoneRole.id);
+    if (!overwrite || !overwrite.deny.has('SendMessages')) {
+      skippedCount++;
+      continue;
+    }
+
+    try {
+      // SendMessages を null（継承）に戻す
+      await channel.permissionOverwrites.edit(everyoneRole, {
+        SendMessages: null,
+      }, { reason: 'アンロック: 管理者による全チャンネルアンロック' });
+      unlockedCount++;
+    } catch (e) {
+      console.error(`unlockChannels: チャンネル ${channel.name} のアンロックに失敗:`, e);
+      failedCount++;
+    }
+  }
+
+  await interaction.editReply({
+    content: `🔓 ${unlockedCount}個のチャンネルをアンロックしました。` +
+      (skippedCount > 0 ? ` (${skippedCount}個はbot未ロックのためスキップ)` : '') +
+      (failedCount > 0 ? ` (${failedCount}個は失敗)` : ''),
+    ephemeral: true,
+  });
+}
+
 module.exports = {
   hasManageGuildPermission,
   backupServer,
@@ -649,4 +693,5 @@ module.exports = {
   addRoleToAll,
   resetServerChannels,
   lockChannels,
+  unlockChannels,
 };
