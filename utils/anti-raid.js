@@ -113,6 +113,15 @@ const MASS_ACTION_THRESHOLD = 2;
 const PROBATION_MS = 24 * 60 * 60 * 1000;
 const GHOST_PING_SCORE = 15; // 新機能: ゴーストピン加算
 
+// ===== ヌークBot対策定数 =====
+const NUKE_DETECT_WINDOW_MS = 30 * 1000;       // 30秒ウィンドウ
+const CHANNEL_DELETE_NUKE_THRESHOLD = 3;        // 30秒以内チャンネル削除上限
+const ROLE_DELETE_NUKE_THRESHOLD = 3;           // 30秒以内ロール削除上限
+const MASS_BAN_NUKE_THRESHOLD = 5;              // 30秒以内BAN上限
+const CHANNEL_CREATE_NUKE_THRESHOLD = 5;        // 30秒以内チャンネル作成上限
+const FLOOD_MSG_THRESHOLD = 8;                  // 精密連投: 10秒以内メッセージ数
+const FLOOD_MSG_WINDOW_MS = 10 * 1000;
+
 // ノリ連投減衰率
 const SAME_USER_SPAM_DECAY = 0.5;
 
@@ -197,6 +206,9 @@ const userCommandDetails = new Map();
 const userAttachmentLog = new Map(); // 添付ファイル連投用
 const dangerRoleDistLog = new Map();  // 危険権限配布連鎖用
 const webhookCreateLog = new Map();   // Webhookスパム用
+const channelDeleteLog = new Map();   // ヌーク: チャンネル削除追跡
+const nukeBanLog = new Map();         // ヌーク: 大量BAN追跡
+const channelFloodLog = new Map();    // ヌーク: チャンネル別フラッド追跡
 
 // ===== ユーティリティ関数 =====
 function hasDangerousPerms(permBits) {
@@ -898,9 +910,60 @@ async function handlePersonalSimilarityDetection(message) {
   }
 }
 
+// ===== ヌークBot: Botメッセージスパム検知 =====
+async function handleBotSpam(message) {
+  if (!message.author.bot || !message.guild) return false;
+  const content = message.content || '';
+
+  // @everyone/@here + discord.gg = ヌークBotスパム → 即BAN
+  if ((content.includes('@everyone') || content.includes('@here')) &&
+      /discord\.gg\//i.test(content)) {
+    await safeDelete(message, 'ヌークBotによる@everyoneスパム');
+    await message.guild.members.ban(message.author.id, {
+      reason: 'ヌークBot: @everyone+招待リンクスパム',
+      deleteMessageSeconds: 86400,
+    }).catch(() => {});
+    await sendLogEmbed(message.guild, {
+      title: '🚨 ヌークBotのスパムを検知 → 即時BAN',
+      description: `Bot <@${message.author.id}> が @everyone+招待リンクを連投しました。即BANしました。`,
+      color: 0xff0000,
+      content,
+    });
+    return true;
+  }
+
+  // 精密連投検知: 同一Botが同一チャンネルでFLOOD_MSG_THRESHOLD件以上 → 即BAN
+  const key = `${message.guild.id}:${message.channel.id}:${message.author.id}`;
+  if (!channelFloodLog.has(key)) channelFloodLog.set(key, []);
+  const arr = channelFloodLog.get(key);
+  const now = Date.now();
+  arr.push(now);
+  const recent = arr.filter(t => now - t < FLOOD_MSG_WINDOW_MS);
+  channelFloodLog.set(key, recent);
+
+  if (recent.length >= FLOOD_MSG_THRESHOLD) {
+    await message.guild.members.ban(message.author.id, {
+      reason: `ヌークBot: ${FLOOD_MSG_WINDOW_MS / 1000}秒以内に${recent.length}件フラッド`,
+      deleteMessageSeconds: 86400,
+    }).catch(() => {});
+    await sendLogEmbed(message.guild, {
+      title: '🚨 BotによるフラッドMSG → 即時BAN',
+      description: `Bot <@${message.author.id}> が ${FLOOD_MSG_WINDOW_MS / 1000}秒以内に ${recent.length} 件のメッセージをフラッド。即BANしました。`,
+      color: 0xff0000,
+    });
+    return true;
+  }
+  return false;
+}
+
 // ===== メインのメッセージハンドラ（全機能統合）=====
 async function handleMessage(message) {
-  if (!message?.guild || message.author?.bot) return;
+  if (!message?.guild || !message.author) return;
+  // Botメッセージはヌークスパム検知のみ（通常荒らし判定はスキップ）
+  if (message.author.bot) {
+    await handleBotSpam(message);
+    return;
+  }
   const member = message.member;
   if (!member || isWhitelisted(member) || member.permissions?.has(PermissionsBitField.Flags.Administrator)) return;
 
@@ -1040,7 +1103,8 @@ async function handleReactionAdd(reaction, user) {
 async function checkAndPunishMassAction(entry) {
   const { executor, action, guild, target } = entry;
   const executorMember = guild.members.cache.get(executor.id);
-  if (!executorMember || executorMember.bot || isWhitelisted(executorMember) || isInProbation(executor.id)) return false;
+  // ヌークBot対策: botもスキップしない。ホワイトリストと調査中のみスキップ
+  if (!executorMember || isWhitelisted(executorMember) || isInProbation(executor.id)) return false;
   const now = Date.now();
   const executorId = executor.id;
   const logMap = (action === AuditLogEvent.MemberBanAdd) ? massBanLog : massNukeLog;
@@ -1055,8 +1119,14 @@ async function checkAndPunishMassAction(entry) {
     else if (action === AuditLogEvent.ChannelDelete) reason = '不審なチャンネル削除';
     else if (action === AuditLogEvent.RoleDelete) reason = '不審なロール削除';
     try {
-      const ok = await stripAllRoles(guild, executor.id, reason);
-      await sendLogEmbed(guild, { title: `🚨 大量操作を検知・権限剥奪`, member: executorMember, description: `理由: ${reason}\n成功: ${ok}`, color: 0xff4757 });
+      if (executorMember.user.bot) {
+        // ヌークBot: 即BAN
+        await guild.members.ban(executor.id, { reason: `ヌークBot検知: ${reason}` }).catch(() => {});
+        await sendLogEmbed(guild, { title: `🚨 ヌークBot検知 → 即時BAN`, member: executorMember, description: `理由: ${reason}`, color: 0xff0000 });
+      } else {
+        const ok = await stripAllRoles(guild, executor.id, reason);
+        await sendLogEmbed(guild, { title: `🚨 大量操作を検知・権限剥奪`, member: executorMember, description: `理由: ${reason}\n成功: ${ok}`, color: 0xff4757 });
+      }
     } catch { return false; }
     return true;
   }
@@ -1067,7 +1137,8 @@ async function handleAuditLogEntry(entry) {
   const { guild, executor, action, target } = entry;
   if (!guild || !executor) return;
   const member = guild.members.cache.get(executor.id);
-  if (!member || member.user.bot || isWhitelisted(member)) return;
+  // ヌークBot対策: botもスキップしない
+  if (!member || isWhitelisted(member)) return;
 
   // 【新機能4】Webhook作成スパム検知
   if (action === AuditLogEvent.WebhookCreate) {
@@ -1150,8 +1221,17 @@ async function handleBotAdd(member) {
       const logs = await member.guild.fetchAuditLogs({ type: AuditLogEvent.BotAdd, limit: 1 });
       const entry = logs.entries.first();
       const executor = entry?.executor;
-      await member.roles.set([], '未認証Botのため権限剥奪').catch(() => {});
-      await sendLogEmbed(member.guild, { title: '🚨 怪しいBot検知', member, description: `招待者: ${executor?.tag || '不明'}`, color: 0xff4757 });
+      // ヌークBot対策: 未認証Botは即BAN（ロール剥奪では不十分）
+      await member.guild.members.ban(member.id, { reason: 'ヌーク対策: 未認証Botの自動BAN' }).catch(async () => {
+        // BANできない場合はキック
+        await member.kick('ヌーク対策: 未認証Bot').catch(() => {});
+      });
+      await sendLogEmbed(member.guild, {
+        title: '🚨 未認証Bot → 即時BAN',
+        member,
+        description: `招待者: ${executor?.tag || '不明'}\n未認証のBotをBANしました。正規のBotを追加する場合は管理者が手動でホワイトリストに追加してください。`,
+        color: 0xff0000,
+      });
       return true;
     } catch {}
   }
@@ -1196,13 +1276,24 @@ async function handleRoleUpdate(oldRole, newRole) {
 
     const isEveryone = oldRole.id === oldRole.guild.id;
     const addedNames = added.map(p => { const key = Object.keys(PermissionsBitField.Flags).find(k => PermissionsBitField.Flags[k] === p); return key || String(p); });
+    // ヌークBot対策: @everyone への危険権限付与は管理者・Botでも常に差し戻し+BAN
     await newRole.setPermissions(before, '危険権限の自動差し戻し').catch(() => {});
     if (isEveryone) {
-      await oldRole.guild.members.ban(executor.id, { reason: '@everyone に危険権限を付与' }).catch(() => {});
-      await sendLogEmbed(oldRole.guild, { title: '🚨 @everyone 危険権限付与 → 即BAN・差し戻し', member, description: `付与された権限: ${addedNames.join(', ')}` });
+      await oldRole.guild.members.ban(executor.id, { reason: '@everyone に危険権限を付与（ヌーク対策）' }).catch(() => {});
+      await sendLogEmbed(oldRole.guild, {
+        title: '🚨 @everyone 危険権限付与 → 即BAN・差し戻し',
+        member,
+        description: `付与された権限: ${addedNames.join(', ')}\n管理者・Bot問わず即時BANを実施しました。`,
+        color: 0xff0000,
+      });
     } else {
-      const ok = await stripAllRoles(oldRole.guild, executor.id, `ロール「${oldRole.name}」に危険権限を付与`);
-      await sendLogEmbed(oldRole.guild, { title: `⚠️ ロール「${oldRole.name}」に危険権限付与 → 権限剥奪`, member, description: `付与された権限: ${addedNames.join(', ')}\n実行者権限剥奪: ${ok}`, color: 0xff4757 });
+      if (member.user.bot) {
+        await oldRole.guild.members.ban(executor.id, { reason: `ヌークBot: ロールへの危険権限付与` }).catch(() => {});
+        await sendLogEmbed(oldRole.guild, { title: `🚨 ヌークBot: ロール危険権限付与 → 即BAN`, member, description: `付与された権限: ${addedNames.join(', ')}`, color: 0xff0000 });
+      } else {
+        const ok = await stripAllRoles(oldRole.guild, executor.id, `ロール「${oldRole.name}」に危険権限を付与`);
+        await sendLogEmbed(oldRole.guild, { title: `⚠️ ロール「${oldRole.name}」に危険権限付与 → 権限剥奪`, member, description: `付与された権限: ${addedNames.join(', ')}\n実行者権限剥奪: ${ok}`, color: 0xff4757 });
+      }
     }
   } catch {}
 }
@@ -1226,6 +1317,23 @@ async function onGuildBanAdd(ban) {
   setTimeout(async () => {
     const executor = await findExecutorForTarget(guild, AuditLogEvent.MemberBanAdd, user.id);
     if (!executor) return;
+    // ヌークBot対策: 30秒以内にMASS_BAN_NUKE_THRESHOLD件以上BANしたら即BAN
+    const now = Date.now();
+    if (!nukeBanLog.has(executor.id)) nukeBanLog.set(executor.id, []);
+    const banArr = nukeBanLog.get(executor.id);
+    banArr.push(now);
+    const recentBans = banArr.filter(t => now - t < NUKE_DETECT_WINDOW_MS);
+    nukeBanLog.set(executor.id, recentBans);
+    const executorMember = guild.members.cache.get(executor.id);
+    if (!isWhitelisted(executorMember) && recentBans.length >= MASS_BAN_NUKE_THRESHOLD) {
+      await guild.members.ban(executor.id, { reason: `ヌーク対策: ${NUKE_DETECT_WINDOW_MS/1000}秒以内に${recentBans.length}件の大量BAN` }).catch(() => {});
+      await sendLogEmbed(guild, {
+        title: '🚨 大量BAN → 実行者を即時BAN',
+        description: `実行者 <@${executor.id}> が ${NUKE_DETECT_WINDOW_MS/1000}秒以内に ${recentBans.length} 件のBANを実行。即BANしました。`,
+        color: 0xff0000,
+      });
+      return;
+    }
     if (isWhitelisted(executor) || isInProbation(executor.id) || recordAndCheckMassAction(executor.id, user.id, 'BAN')) {
       try { await guild.members.unban(user.id, '荒らし検知: 誤BAN救済'); } catch {}
       const ok = await stripAllRoles(guild, executor.id, '荒らし検知: クールダウン中の処罰 or 大量処罰');
@@ -1383,6 +1491,37 @@ async function handleGuildUpdate(oldGuild, newGuild) {
   } catch {}
 }
 
+// ===== ヌークBot対策: チャンネル削除検知 =====
+async function handleChannelDelete(channel) {
+  if (!channel.guild) return;
+  try {
+    const logs = await channel.guild.fetchAuditLogs({ type: AuditLogEvent.ChannelDelete, limit: 1 });
+    const entry = logs.entries.first();
+    const executor = entry?.executor;
+    if (!executor) return;
+    const member = channel.guild.members.cache.get(executor.id);
+    if (member && isWhitelisted(member)) return;
+    const now = Date.now();
+    if (!channelDeleteLog.has(executor.id)) channelDeleteLog.set(executor.id, []);
+    const arr = channelDeleteLog.get(executor.id);
+    arr.push(now);
+    const recent = arr.filter(t => now - t < NUKE_DETECT_WINDOW_MS);
+    channelDeleteLog.set(executor.id, recent);
+    if (recent.length >= CHANNEL_DELETE_NUKE_THRESHOLD) {
+      // Bot・人間問わず即BAN
+      await channel.guild.members.ban(executor.id, {
+        reason: `ヌーク対策: ${NUKE_DETECT_WINDOW_MS/1000}秒以内に${recent.length}個のチャンネルを削除`,
+      }).catch(() => {});
+      await sendLogEmbed(channel.guild, {
+        title: '🚨 大量チャンネル削除 → 即時BAN',
+        member,
+        description: `${NUKE_DETECT_WINDOW_MS/1000}秒以内に ${recent.length} 個のチャンネルを削除\n実行者を即時BANしました。`,
+        color: 0xff0000,
+      });
+    }
+  } catch {}
+}
+
 async function handleChannelCreate(channel) {
   if (!channel.guild) return;
   try {
@@ -1396,13 +1535,18 @@ async function handleChannelCreate(channel) {
     if (!channelCreateLog.has(executor.id)) channelCreateLog.set(executor.id, []);
     const arr = channelCreateLog.get(executor.id);
     arr.push(now);
-    const recent = arr.filter(t => now - t < 60000);
+    const recent = arr.filter(t => now - t < NUKE_DETECT_WINDOW_MS);
     channelCreateLog.set(executor.id, recent);
-    await sendLogEmbed(channel.guild, { title: '📋 チャンネル作成', member, description: `#${channel.name} が作成されました（直近60秒: ${recent.length}回）`, color: 0x3498db });
-    if (recent.length >= 3) {
+    if (recent.length >= CHANNEL_CREATE_NUKE_THRESHOLD) {
       await channel.delete('荒らし対策: 大量チャンネル作成').catch(() => {});
-      const ok = await stripAllRoles(channel.guild, executor.id, '大量チャンネル作成');
-      await sendLogEmbed(channel.guild, { title: '🚨 大量チャンネル作成 → 権限剥奪', member, description: `60秒以内に ${recent.length} 個作成\n権限剥奪: ${ok}` });
+      if (member.user.bot) {
+        // ヌークBot: 即BAN
+        await channel.guild.members.ban(executor.id, { reason: `ヌークBot: ${NUKE_DETECT_WINDOW_MS/1000}秒以内に${recent.length}個チャンネル作成` }).catch(() => {});
+        await sendLogEmbed(channel.guild, { title: '🚨 ヌークBot: 大量チャンネル作成 → 即時BAN', member, description: `${NUKE_DETECT_WINDOW_MS/1000}秒以内に ${recent.length} 個作成` , color: 0xff0000 });
+      } else {
+        const ok = await stripAllRoles(channel.guild, executor.id, '大量チャンネル作成');
+        await sendLogEmbed(channel.guild, { title: '🚨 大量チャンネル作成 → 権限剥奪', member, description: `${NUKE_DETECT_WINDOW_MS/1000}秒以内に ${recent.length} 個作成\n権限剥奪: ${ok}` });
+      }
     }
   } catch {}
 }
@@ -1440,17 +1584,22 @@ async function handleRoleDelete(role) {
     const executor = entry?.executor;
     if (!executor) return;
     const member = role.guild.members.cache.get(executor.id);
+    // ヌークBot対策: botもスキップしない
     if (!member || isWhitelisted(member)) return;
     const now = Date.now();
     if (!roleDeleteLog.has(executor.id)) roleDeleteLog.set(executor.id, []);
     const arr = roleDeleteLog.get(executor.id);
     arr.push(now);
-    const recent = arr.filter(t => now - t < 60000);
+    const recent = arr.filter(t => now - t < NUKE_DETECT_WINDOW_MS);
     roleDeleteLog.set(executor.id, recent);
-    await sendLogEmbed(role.guild, { title: `📋 ロール削除: @${role.name}（直近60秒: ${recent.length}回）`, member, description: `削除されたロール名: ${role.name}`, color: 0xe74c3c });
-    if (recent.length >= 3) {
-      const ok = await stripAllRoles(role.guild, executor.id, '大量ロール削除');
-      await sendLogEmbed(role.guild, { title: '🚨 大量ロール削除 → 権限剥奪', member, description: `60秒以内に ${recent.length} 個削除\n権限剥奪: ${ok}` });
+    if (recent.length >= ROLE_DELETE_NUKE_THRESHOLD) {
+      if (member.user.bot) {
+        await role.guild.members.ban(executor.id, { reason: `ヌークBot: ${NUKE_DETECT_WINDOW_MS/1000}秒以内に${recent.length}個ロール削除` }).catch(() => {});
+        await sendLogEmbed(role.guild, { title: '🚨 ヌークBot: 大量ロール削除 → 即時BAN', member, description: `${NUKE_DETECT_WINDOW_MS/1000}秒以内に ${recent.length} 個削除`, color: 0xff0000 });
+      } else {
+        const ok = await stripAllRoles(role.guild, executor.id, '大量ロール削除');
+        await sendLogEmbed(role.guild, { title: '🚨 大量ロール削除 → 権限剥奪', member, description: `${NUKE_DETECT_WINDOW_MS/1000}秒以内に ${recent.length} 個削除\n権限剥奪: ${ok}` });
+      }
     }
   } catch {}
 }
@@ -1495,6 +1644,8 @@ module.exports = {
   handleDirectMessage,
   handleInteraction,
   handleMessageDelete,
+  handleChannelDelete,
+  handleBotSpam,
   pendingModActions,
   restoreRoles,
   hasManageGuildPermission,
