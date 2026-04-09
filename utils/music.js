@@ -51,17 +51,19 @@ function getAudioUrl(videoUrl) {
   try {
     var r = spawnSync(ytDlpPath, [
       '-f', 'bestaudio',
-      '--print', 'urls',
+      '--print', 'url',
       '--no-playlist',
       '--no-warnings',
       videoUrl,
-    ], { encoding: 'utf8', timeout: 15000 });
+    ], { encoding: 'utf8', timeout: 20000 });
     if (r.status === 0 && r.stdout && r.stdout.trim()) {
       var url = r.stdout.trim().split('\n')[0];
       console.log('[music] got audio URL via yt-dlp');
       return url;
     }
-    if (r.stderr) console.warn('[yt-dlp] stderr:', r.stderr.slice(0, 200));
+    console.warn('[yt-dlp] getAudioUrl failed. status:', r.status);
+    if (r.stderr) console.warn('[yt-dlp] stderr:', r.stderr.slice(0, 500));
+    if (r.error) console.warn('[yt-dlp] spawn error:', r.error.message);
     return null;
   } catch (e) {
     console.error('[yt-dlp] getAudioUrl failed:', e.message);
@@ -215,7 +217,7 @@ async function playYouTube(channel, url, textChannel) {
   var title = url;
   try {
     if (ytDlpPath) {
-      var p = spawnSync(ytDlpPath, ['--get-title', '--no-warnings', '--no-playlist', url], {
+      var p = spawnSync(ytDlpPath, ['--print', 'title', '--no-warnings', '--no-playlist', url], {
         encoding: 'utf8', timeout: 10000,
       });
       if (p.status === 0 && p.stdout && p.stdout.trim()) title = p.stdout.trim();
