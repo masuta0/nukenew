@@ -1,12 +1,11 @@
 const axios = require('axios');
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY
-    ? process.env.GEMINI_API_KEY.split(',').map(k => k.trim()).filter(Boolean)
+    ? process.env.GEMINI_API_KEY.split(/[,\n、，]+/).map(k => k.trim()).filter(Boolean)
     : [];
 
 const AI_USER_COOLDOWN_SEC   = 4;
 const AI_GLOBAL_COOLDOWN_SEC = 2;
-const MAX_QUOTA_BLOCK_SEC    = 8;
 
 // モデル名に models/ プレフィックスを追加（404回避の最重要ポイント）
 const MODELS = (process.env.GEMINI_MODELS
@@ -44,8 +43,8 @@ const MAX_STORED_USERS   = 1000;
 const conversationHistory = new Map();
 const aiCooldowns = new Map();
 let lastGlobalCall = 0;
-let quotaBlockedUntil = 0;
 const unavailableModels = new Set();
+const keyBackoffUntil = new Map();
 
 function saveHistory(userId, history) {
     if (!conversationHistory.has(userId) && conversationHistory.size >= MAX_STORED_USERS) {
@@ -57,9 +56,6 @@ function saveHistory(userId, history) {
 
 function checkAiCooldown(userId) {
     const now = Date.now();
-    if (now < quotaBlockedUntil) {
-        return { type: 'quota', remaining: Math.ceil((quotaBlockedUntil - now) / 1000) };
-    }
     const globalDiff = now - lastGlobalCall;
     if (globalDiff < AI_GLOBAL_COOLDOWN_SEC * 1000) {
         return { type: 'global', remaining: Math.ceil((AI_GLOBAL_COOLDOWN_SEC * 1000 - globalDiff) / 1000) };
@@ -152,7 +148,6 @@ async function chat(prompt, userId) {
 
     const cooldown = checkAiCooldown(userId);
     if (cooldown) {
-        if (cooldown.type === 'quota') return `制限中… あと ${cooldown.remaining} 秒待ってね。`;
         return `あと ${cooldown.remaining} 秒待ってね！`;
     }
 
@@ -161,10 +156,22 @@ async function chat(prompt, userId) {
     const history = conversationHistory.get(userId) || [];
     const contents = [...history, { role: 'user', parts: [{ text: prompt }] }];
 
+    const now = Date.now();
+    const availableKeys = GEMINI_API_KEY.filter((apiKey) => {
+        const blockedUntil = keyBackoffUntil.get(apiKey) || 0;
+        return blockedUntil <= now;
+    });
+
+    if (availableKeys.length === 0) {
+        const nextReadyMs = Math.min(...GEMINI_API_KEY.map((apiKey) => keyBackoffUntil.get(apiKey) || now));
+        const waitSec = Math.max(1, Math.ceil((nextReadyMs - now) / 1000));
+        return `制限中… あと ${waitSec} 秒待ってね。`;
+    }
+
     for (const modelPath of MODELS) {
         if (unavailableModels.has(modelPath)) continue;
-        for (let i = 0; i < GEMINI_API_KEY.length; i++) {
-            const apiKey = GEMINI_API_KEY[i];
+        for (let i = 0; i < availableKeys.length; i++) {
+            const apiKey = availableKeys[i];
             try {
                 const rawText = await tryRequest(apiKey, modelPath, contents);
                 if (!rawText) continue;
@@ -191,8 +198,8 @@ async function chat(prompt, userId) {
                     break;
                 }
                 if (status === 429) {
-                    quotaBlockedUntil = Date.now() + 5000;
-                    console.warn(`[AI] 429 Rate Limit.`);
+                    keyBackoffUntil.set(apiKey, Date.now() + 5000);
+                    console.warn(`[AI] 429 Rate Limit. backoff applied for a key.`);
                     continue;
                 }
                 console.error(`[AI Error] ${modelPath} status=${status}: ${errBody}`);
