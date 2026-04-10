@@ -47,7 +47,6 @@ const aiCooldowns = new Map();
 let lastGlobalCall = 0;
 const unavailableModels = new Set();
 const keyBackoffUntil = new Map();
-const keyBackoffSec = new Map();
 
 function saveHistory(userId, history) {
     if (!conversationHistory.has(userId) && conversationHistory.size >= MAX_STORED_USERS) {
@@ -209,13 +208,8 @@ async function chat(prompt, userId) {
                     break;
                 }
                 if (status === 429) {
-                    const prevSec = keyBackoffSec.get(apiKey) || 5;
-                    const nextSec = Number.isFinite(retryAfterHeader) && retryAfterHeader > 0
-                        ? retryAfterHeader
-                        : Math.min(prevSec * 2, 60);
-                    keyBackoffSec.set(apiKey, nextSec);
-                    keyBackoffUntil.set(apiKey, Date.now() + nextSec * 1000);
-                    console.warn(`[AI] 429 Rate Limit. key backoff ${nextSec}s.`);
+                    keyBackoffUntil.set(apiKey, Date.now() + 5000);
+                    console.warn(`[AI] 429 Rate Limit. backoff applied for a key.`);
                     continue;
                 }
                 keyBackoffSec.set(apiKey, 5);
