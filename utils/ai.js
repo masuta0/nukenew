@@ -7,10 +7,12 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY
 const AI_USER_COOLDOWN_SEC   = 4;
 const AI_GLOBAL_COOLDOWN_SEC = 2;
 
-// モデル名に models/ プレフィックスを追加（404回避の最重要ポイント）
+const DEFAULT_MODELS = ['models/gemini-2.0-flash', 'models/gemini-2.0-flash-lite', 'models/gemini-1.5-flash'];
+// モデル名は models/ プレフィックス付きに正規化
 const MODELS = (process.env.GEMINI_MODELS
     ? process.env.GEMINI_MODELS.split(',').map(m => m.trim()).filter(Boolean)
-    : ['models/gemini-2.0-flash', 'models/gemini-2.0-flash-lite', 'models/gemini-1.5-flash-latest']);
+    : DEFAULT_MODELS
+).map((model) => (model.startsWith('models/') ? model : `models/${model}`));
 
 const SYSTEM_INSTRUCTION = `
 あなたは「ますまに鯖」専用のDiscord Botです。
@@ -142,6 +144,12 @@ async function tryRequest(apiKey, modelPath, contents) {
     return text || null;
 }
 
+function shouldDisableModel(status, errBody = '') {
+    if (status === 404) return true;
+    if (status === 400 && /not found for api version|unsupported model/i.test(errBody)) return true;
+    return false;
+}
+
 async function chat(prompt, userId) {
     if (GEMINI_API_KEY.length === 0) return 'AIキーが未設定です。';
     if (prompt.length > MAX_INPUT_CHARS) return 'プロンプトが長すぎます。';
@@ -177,6 +185,7 @@ async function chat(prompt, userId) {
                 if (!rawText) continue;
 
                 const aiResponse = truncateResponse(rawText);
+                keyBackoffSec.set(apiKey, 5);
                 setAiCooldown(userId);
 
                 const newHistory = [
@@ -191,10 +200,11 @@ async function chat(prompt, userId) {
             } catch (err) {
                 const status = err.response?.status;
                 const errBody = err.response?.data?.error?.message || err.message;
+                const retryAfterHeader = Number(err.response?.headers?.['retry-after']);
                 
-                if (status === 404) {
+                if (shouldDisableModel(status, errBody)) {
                     unavailableModels.add(modelPath);
-                    console.error(`[AI Error] ${modelPath} 404 - Not Found. URLを確認してください。`);
+                    console.error(`[AI Error] ${modelPath} is unavailable. status=${status} message=${errBody}`);
                     break;
                 }
                 if (status === 429) {
@@ -202,6 +212,7 @@ async function chat(prompt, userId) {
                     console.warn(`[AI] 429 Rate Limit. backoff applied for a key.`);
                     continue;
                 }
+                keyBackoffSec.set(apiKey, 5);
                 console.error(`[AI Error] ${modelPath} status=${status}: ${errBody}`);
                 continue;
             }
