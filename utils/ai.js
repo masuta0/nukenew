@@ -1,17 +1,18 @@
 const axios = require('axios');
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY
-    ? process.env.GEMINI_API_KEY.split(',').map(k => k.trim()).filter(Boolean)
+    ? process.env.GEMINI_API_KEY.split(/[,\n、，]+/).map(k => k.trim()).filter(Boolean)
     : [];
 
 const AI_USER_COOLDOWN_SEC   = 4;
 const AI_GLOBAL_COOLDOWN_SEC = 2;
-const MAX_QUOTA_BLOCK_SEC    = 8;
 
-// モデル名に models/ プレフィックスを追加（404回避の最重要ポイント）
+const DEFAULT_MODELS = ['models/gemini-2.0-flash', 'models/gemini-2.0-flash-lite', 'models/gemini-1.5-flash'];
+// モデル名は models/ プレフィックス付きに正規化
 const MODELS = (process.env.GEMINI_MODELS
     ? process.env.GEMINI_MODELS.split(',').map(m => m.trim()).filter(Boolean)
-    : ['models/gemini-2.0-flash', 'models/gemini-2.0-flash-lite', 'models/gemini-1.5-flash-latest']);
+    : DEFAULT_MODELS
+).map((model) => (model.startsWith('models/') ? model : `models/${model}`));
 
 const SYSTEM_INSTRUCTION = `
 あなたは「ますまに鯖」専用のDiscord Botです。
@@ -44,8 +45,9 @@ const MAX_STORED_USERS   = 1000;
 const conversationHistory = new Map();
 const aiCooldowns = new Map();
 let lastGlobalCall = 0;
-let quotaBlockedUntil = 0;
 const unavailableModels = new Set();
+const keyBackoffUntil = new Map();
+const keyBackoffSec = new Map();
 
 function saveHistory(userId, history) {
     if (!conversationHistory.has(userId) && conversationHistory.size >= MAX_STORED_USERS) {
@@ -57,9 +59,6 @@ function saveHistory(userId, history) {
 
 function checkAiCooldown(userId) {
     const now = Date.now();
-    if (now < quotaBlockedUntil) {
-        return { type: 'quota', remaining: Math.ceil((quotaBlockedUntil - now) / 1000) };
-    }
     const globalDiff = now - lastGlobalCall;
     if (globalDiff < AI_GLOBAL_COOLDOWN_SEC * 1000) {
         return { type: 'global', remaining: Math.ceil((AI_GLOBAL_COOLDOWN_SEC * 1000 - globalDiff) / 1000) };
@@ -146,13 +145,18 @@ async function tryRequest(apiKey, modelPath, contents) {
     return text || null;
 }
 
+function shouldDisableModel(status, errBody = '') {
+    if (status === 404) return true;
+    if (status === 400 && /not found for api version|unsupported model/i.test(errBody)) return true;
+    return false;
+}
+
 async function chat(prompt, userId) {
     if (GEMINI_API_KEY.length === 0) return 'AIキーが未設定です。';
     if (prompt.length > MAX_INPUT_CHARS) return 'プロンプトが長すぎます。';
 
     const cooldown = checkAiCooldown(userId);
     if (cooldown) {
-        if (cooldown.type === 'quota') return `制限中… あと ${cooldown.remaining} 秒待ってね。`;
         return `あと ${cooldown.remaining} 秒待ってね！`;
     }
 
@@ -161,15 +165,28 @@ async function chat(prompt, userId) {
     const history = conversationHistory.get(userId) || [];
     const contents = [...history, { role: 'user', parts: [{ text: prompt }] }];
 
+    const now = Date.now();
+    const availableKeys = GEMINI_API_KEY.filter((apiKey) => {
+        const blockedUntil = keyBackoffUntil.get(apiKey) || 0;
+        return blockedUntil <= now;
+    });
+
+    if (availableKeys.length === 0) {
+        const nextReadyMs = Math.min(...GEMINI_API_KEY.map((apiKey) => keyBackoffUntil.get(apiKey) || now));
+        const waitSec = Math.max(1, Math.ceil((nextReadyMs - now) / 1000));
+        return `制限中… あと ${waitSec} 秒待ってね。`;
+    }
+
     for (const modelPath of MODELS) {
         if (unavailableModels.has(modelPath)) continue;
-        for (let i = 0; i < GEMINI_API_KEY.length; i++) {
-            const apiKey = GEMINI_API_KEY[i];
+        for (let i = 0; i < availableKeys.length; i++) {
+            const apiKey = availableKeys[i];
             try {
                 const rawText = await tryRequest(apiKey, modelPath, contents);
                 if (!rawText) continue;
 
                 const aiResponse = truncateResponse(rawText);
+                keyBackoffSec.set(apiKey, 5);
                 setAiCooldown(userId);
 
                 const newHistory = [
@@ -184,17 +201,24 @@ async function chat(prompt, userId) {
             } catch (err) {
                 const status = err.response?.status;
                 const errBody = err.response?.data?.error?.message || err.message;
+                const retryAfterHeader = Number(err.response?.headers?.['retry-after']);
                 
-                if (status === 404) {
+                if (shouldDisableModel(status, errBody)) {
                     unavailableModels.add(modelPath);
-                    console.error(`[AI Error] ${modelPath} 404 - Not Found. URLを確認してください。`);
+                    console.error(`[AI Error] ${modelPath} is unavailable. status=${status} message=${errBody}`);
                     break;
                 }
                 if (status === 429) {
-                    quotaBlockedUntil = Date.now() + 5000;
-                    console.warn(`[AI] 429 Rate Limit.`);
+                    const prevSec = keyBackoffSec.get(apiKey) || 5;
+                    const nextSec = Number.isFinite(retryAfterHeader) && retryAfterHeader > 0
+                        ? retryAfterHeader
+                        : Math.min(prevSec * 2, 60);
+                    keyBackoffSec.set(apiKey, nextSec);
+                    keyBackoffUntil.set(apiKey, Date.now() + nextSec * 1000);
+                    console.warn(`[AI] 429 Rate Limit. key backoff ${nextSec}s.`);
                     continue;
                 }
+                keyBackoffSec.set(apiKey, 5);
                 console.error(`[AI Error] ${modelPath} status=${status}: ${errBody}`);
                 continue;
             }
