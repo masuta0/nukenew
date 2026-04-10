@@ -6,6 +6,7 @@
 //    2. 「荒らし確定フラグ（CONFIRMED_RAID）」が立った場合のみ即削除・即処罰
 //    3. 確定は「複数の異常行動が短時間で重なった場合」のみ
 //    4. 誤検知ゼロに近づける
+//    5. 乗っ取り（Bot/Webhook）の自動防御と自動復旧（パージ）
 // ================================================================
 
 const fs = require('fs');
@@ -294,6 +295,7 @@ const webhookCreateLog = new Map();
 const channelDeleteLog = new Map();
 const nukeBanLog = new Map();
 const channelFloodLog = new Map();
+const webhookFloodLog = new Map(); // ★ NEW: Webhookスパム用
 
 // ================================================================
 //  ★ NEW: 追加内部状態マップ
@@ -302,7 +304,7 @@ const channelFloodLog = new Map();
 const anomalyLog = new Map();
 // CONFIRMED_RAID: 確定済みユーザーセット（重複処罰防止）
 const confirmedRaidUsers = new Set();
-// Trust System: 参加時刻記録（handleMemberJoin で記録済みだが念のため別管理）
+// Trust System: 参加時刻記録
 const userJoinTimeMap = new Map();
 // 権限悪用拡張: 招待リンク生成ログ
 const inviteCreateLog = new Map();
@@ -515,9 +517,6 @@ function isNewUser(member) {
 
 /**
  * チャンネルを分類する（lenient / strict / normal）
- * - lenient: 雑談チャンネル（検知を緩和）
- * - strict: 認証・公開チャンネル（検知を厳格化）
- * - normal: 通常チャンネル
  */
 function classifyChannel(channel) {
   if (!channel?.name) return 'normal';
@@ -529,15 +528,8 @@ function classifyChannel(channel) {
 
 /**
  * ★★★ 荒らし異常ログに記録し、確定かどうかを返す
- * 確定条件: CONFIRMED_RAID_WINDOW_MS (7秒) 以内に
- *          CONFIRMED_RAID_MIN_SIGNALS (2) 種類以上の重大な異常
- *
- * @param {string} userId
- * @param {string} anomalyType - CONFIRMED_RAID_TYPES に含まれるものだけ確定に寄与
- * @returns {boolean} 荒らし確定なら true
  */
 function logAnomaly(userId, anomalyType) {
-  // 軽微な異常は確定カウントに入れない
   if (!CONFIRMED_RAID_TYPES.has(anomalyType)) return false;
 
   const now = Date.now();
@@ -545,22 +537,17 @@ function logAnomaly(userId, anomalyType) {
   const log = anomalyLog.get(userId);
   log.push({ type: anomalyType, timestamp: now });
 
-  // 期限外エントリを削除
   const recent = log.filter(e => now - e.timestamp < CONFIRMED_RAID_WINDOW_MS);
   anomalyLog.set(userId, recent);
 
-  // 確定済みなら再確定しない
   if (confirmedRaidUsers.has(userId)) return true;
 
-  // 種別数をカウント
   const types = new Set(recent.map(e => e.type));
   return types.size >= CONFIRMED_RAID_MIN_SIGNALS;
 }
 
 /**
- * ★★★ 荒らし確定時の即処罰
- * - triggerMessage: 即削除する対象メッセージ（なくてもOK）
- * - reason: ログに残す確定理由
+ * ★★★ 荒らし確定時の即処罰および自動復旧（パージ）
  */
 async function executeConfirmedPunishment(member, reason, triggerMessage = null) {
   if (!member || isWhitelisted(member)) return;
@@ -572,7 +559,7 @@ async function executeConfirmedPunishment(member, reason, triggerMessage = null)
     await triggerMessage.delete().catch(() => {});
   }
 
-  // 2. 過去12時間のメッセージを一括削除
+  // 2. ★ 過去12時間のメッセージを一括削除（自動復旧）
   const deleted = await deleteRecentMessages(member.guild, member.id, 12);
 
   // 3. タイムアウト → 失敗したらBAN → それも失敗なら権限剥奪
@@ -599,12 +586,12 @@ async function executeConfirmedPunishment(member, reason, triggerMessage = null)
 
   // 4. ログ出力
   await sendLogEmbed(member.guild, {
-    title: `🚨🚨【荒らし確定】即時処罰: ${action}`,
+    title: `🚨🚨【荒らし確定】即時処罰・自動復旧: ${action}`,
     member,
     description: [
       `**確定理由**: ${reason}`,
       `**処罰内容**: ${action}`,
-      `**削除メッセージ**: 過去12時間 ${deleted} 件`,
+      `**自動復旧パージ**: 過去12時間のメッセージ ${deleted} 件を一括削除しました。`,
       `**確定ロジック**: ${CONFIRMED_RAID_WINDOW_MS/1000}秒以内に複数の異常行動を検知`,
     ].join('\n'),
     color: 0xff0000,
@@ -618,7 +605,6 @@ async function executeConfirmedPunishment(member, reason, triggerMessage = null)
 
 // ================================================================
 //  ★ NEW: 信頼レイヤー（Trust System）チェック
-//  新規ユーザー（参加10分以内）がリンク/添付/大量メンションを送信した場合
 // ================================================================
 async function checkTrustViolation(message) {
   const { member, guild, content, channel } = message;
@@ -670,7 +656,6 @@ async function checkTrustViolation(message) {
     color: 0xff6600,
   });
 
-  // 複数の異常が揃っていれば即確定処罰
   const isConfirmed = anomalyLog.has(member.id) &&
     new Set(anomalyLog.get(member.id).filter(e => Date.now() - e.timestamp < CONFIRMED_RAID_WINDOW_MS).map(e => e.type)).size >= CONFIRMED_RAID_MIN_SIGNALS;
 
@@ -728,7 +713,6 @@ function hasManageGuildPermission(member) {
 
 // ================================================================
 //  ★ バックアップ強化版
-//  チャンネル構造・ロール権限・権限オーバーライド・チャンネル設定を保存・復元
 // ================================================================
 function backupServerState(guild) {
   try {
@@ -737,7 +721,6 @@ function backupServerState(guild) {
       guildName: guild.name,
       verificationLevel: guild.verificationLevel,
 
-      // ロール: 名前・色・権限・順序
       roles: guild.roles.cache.map(r => ({
         id: r.id,
         name: r.name,
@@ -748,7 +731,6 @@ function backupServerState(guild) {
         permissions: r.permissions.bitfield.toString(),
       })),
 
-      // チャンネル: 名前・種別・親・位置・スローモード・NSFW・トピック
       channels: guild.channels.cache.map(c => ({
         id: c.id,
         name: c.name,
@@ -762,7 +744,6 @@ function backupServerState(guild) {
         bitrate: c.bitrate || null,
       })),
 
-      // チャンネルごとの権限オーバーライド（permissionOverwrites）
       permissionOverwrites: (() => {
         const result = {};
         for (const [id, channel] of guild.channels.cache) {
@@ -795,7 +776,6 @@ async function restoreServerState(guild) {
   }
   let restoredRoles = 0, restoredChannels = 0, restoredOverwrites = 0;
   try {
-    // ロール権限の復元
     for (const r of data.roles || []) {
       const role = guild.roles.cache.get(r.id);
       if (role && role.editable) {
@@ -805,7 +785,6 @@ async function restoreServerState(guild) {
         } catch {}
       }
     }
-    // チャンネル名・設定の復元
     for (const c of data.channels || []) {
       const channel = guild.channels.cache.get(c.id);
       if (!channel) continue;
@@ -821,7 +800,6 @@ async function restoreServerState(guild) {
         }
       } catch {}
     }
-    // 権限オーバーライドの復元
     for (const [channelId, overwrites] of Object.entries(data.permissionOverwrites || {})) {
       const channel = guild.channels.cache.get(channelId);
       if (!channel?.permissionOverwrites) continue;
@@ -835,7 +813,6 @@ async function restoreServerState(guild) {
         } catch {}
       }
     }
-    // 認証レベルの復元
     if (data.verificationLevel !== undefined) {
       await guild.setVerificationLevel(data.verificationLevel, 'バックアップ復元').catch(() => {});
     }
@@ -1437,13 +1414,18 @@ async function handleBotSpam(message) {
   if ((content.includes('@everyone') || content.includes('@here')) &&
       /discord\.gg\//i.test(content)) {
     await safeDelete(message, 'ヌークBotによる@everyoneスパム');
+    
+    // ★ Botスパムの自動復旧 (パージ)
+    const deleted = await deleteRecentMessages(message.guild, message.author.id, 1);
+
     await message.guild.members.ban(message.author.id, {
       reason: 'ヌークBot: @everyone+招待リンクスパム',
       deleteMessageSeconds: 86400,
     }).catch(() => {});
+
     await sendLogEmbed(message.guild, {
-      title: '🚨 ヌークBotのスパムを検知 → 即時BAN',
-      description: `Bot <@${message.author.id}> が @everyone+招待リンクを連投しました。即BANしました。`,
+      title: '🚨 ヌークBotのスパムを検知 → 即時BAN & パージ',
+      description: `Bot <@${message.author.id}> が @everyone+招待リンクを連投しました。即BANし、スパムメッセージ ${deleted} 件をパージしました。`,
       color: 0xff0000,
       content,
     });
@@ -1457,13 +1439,14 @@ async function handleBotSpam(message) {
   const recent = arr.filter(t => now - t < FLOOD_MSG_WINDOW_MS);
   channelFloodLog.set(key, recent);
   if (recent.length >= FLOOD_MSG_THRESHOLD) {
+    const deleted = await deleteRecentMessages(message.guild, message.author.id, 1);
     await message.guild.members.ban(message.author.id, {
       reason: `ヌークBot: ${FLOOD_MSG_WINDOW_MS / 1000}秒以内に${recent.length}件フラッド`,
       deleteMessageSeconds: 86400,
     }).catch(() => {});
     await sendLogEmbed(message.guild, {
-      title: '🚨 BotによるフラッドMSG → 即時BAN',
-      description: `Bot <@${message.author.id}> が ${FLOOD_MSG_WINDOW_MS / 1000}秒以内に ${recent.length} 件のメッセージをフラッド。即BANしました。`,
+      title: '🚨 BotによるフラッドMSG → 即時BAN & パージ',
+      description: `Bot <@${message.author.id}> が ${FLOOD_MSG_WINDOW_MS / 1000}秒以内に ${recent.length} 件のメッセージをフラッド。即BANし、メッセージ ${deleted} 件をパージしました。`,
       color: 0xff0000,
     });
     return true;
@@ -1471,33 +1454,70 @@ async function handleBotSpam(message) {
   return false;
 }
 
+// ===== ★ NEW: Webhook 乗っ取り対策 =====
+async function handleWebhookSpam(message) {
+  if (!message.webhookId || !message.guild) return false;
+  const key = message.webhookId;
+  const now = Date.now();
+  if (!webhookFloodLog.has(key)) webhookFloodLog.set(key, []);
+  const arr = webhookFloodLog.get(key);
+  arr.push(now);
+  const recent = arr.filter(t => now - t < 10000); // 10秒間に監視
+  webhookFloodLog.set(key, recent);
+
+  if (recent.length >= 5) { // 10秒に5回以上でスパム判定
+    await message.channel.bulkDelete(recent.length).catch(() => {});
+    try {
+      const webhooks = await message.guild.fetchWebhooks();
+      const targetWh = webhooks.get(key);
+      if (targetWh) {
+        await targetWh.delete('Webhook乗っ取りスパム自動防御');
+        await sendLogEmbed(message.guild, {
+          title: '🚨 Webhook乗っ取り防御・自動復旧',
+          description: `Webhook(\`${targetWh.name}\`) から短時間に大量のスパムを検知しました。\n対象Webhookを自動削除し、直近のスパムメッセージを消去しました。`,
+          color: 0xff0000,
+        });
+      }
+    } catch (e) {
+      console.error('Webhook削除失敗', e);
+    }
+    return true;
+  }
+  return false;
+}
+
 // ================================================================
-//  ★ メインのメッセージハンドラ（チャンネル別ルール統合版）
+//  ★ メインのメッセージハンドラ（優先順位と構成を最適化）
 // ================================================================
 async function handleMessage(message) {
   if (!message?.guild || !message.author) return;
+
+  // Webhookによるスパム対応
+  if (message.webhookId) {
+    await handleWebhookSpam(message);
+    return;
+  }
+
   // Botメッセージはヌークスパム検知のみ
   if (message.author.bot) {
     await handleBotSpam(message);
     return;
   }
+
   const member = message.member;
   if (!member || isWhitelisted(member) || member.permissions?.has(PermissionsBitField.Flags.Administrator)) return;
 
-  // ★ チャンネル種別判定
   const channelType = classifyChannel(message.channel);
 
-  // ★ 信頼レイヤー（新規ユーザーチェック）は全チャンネル共通
-  if (await checkTrustViolation(message)) return;
-
-  // ★ 危険なファイルは全チャンネル共通・即検知
+  // ★ 1. 危険なファイル・リンクを【最優先】でチェック
   if (await handleDangerousFiles(message)) return;
-
-  // ★ 悪意あるリンク系は全チャンネル共通
   if (await handleObfuscatedLink(message)) return;
   if (await handleShortenedUrl(message)) return;
 
-  // ★ 大量メンションは全チャンネル共通
+  // ★ 2. 信頼レイヤー（新規ユーザーチェック）
+  if (await checkTrustViolation(message)) return;
+
+  // ★ 3. 大量メンションチェック
   if (await handleMassMention(message)) return;
 
   // ★ 雑談チャンネル（lenient）では添付スパム・ランダム文字・短文スパムを緩和
@@ -1625,7 +1645,6 @@ async function handleMemberJoin(member) {
   arr.push({ id: member.id, timestamp: now });
   const recent = arr.filter(j => now - j.timestamp < RAID_TIME_WINDOW);
   memberJoinLog.set(gid, recent);
-  const c = currentCfg();
 
   if (recent.length >= RAID_MEMBER_THRESHOLD) {
     await sendLogEmbed(member.guild, { title: '🚨 Raid 警告（大量参加）', member, description: `過去1分で ${recent.length} 人が参加`, color: 0xff4757 });
@@ -1638,27 +1657,26 @@ async function handleMemberJoin(member) {
     }, 10 * 60 * 1000);
     for (const j of recent) {
       const m = await member.guild.members.fetch(j.id).catch(() => null);
-      if (m) { await saveAndStripRoles(m); m.send(`サーバーが一時的に警戒モードです。\n<#${AUTH_CHANNEL_ID}> で認証をお願いします。`).catch(() => {}); addScore(m.id, c.MASS_JOIN); }
+      if (m) { await saveAndStripRoles(m); m.send(`サーバーが一時的に警戒モードです。\n<#${AUTH_CHANNEL_ID}> で認証をお願いします。`).catch(() => {}); }
     }
   }
 
   await handleBadNickname(member);
 
-  let initialScore = 0;
+  // ★ 新規参加時の初期スコア加算を廃止。懸念ログの通知のみ行う。
+  let suspicionFlags = [];
   const age = now - member.user.createdAt.getTime();
-  if (age < 1 * 24 * 60 * 60 * 1000) initialScore += 10;
-  else if (age < 7 * 24 * 60 * 60 * 1000) initialScore += 5;
-  if (!member.user.avatar) initialScore += 5;
+  if (age < 1 * 24 * 60 * 60 * 1000) suspicionFlags.push('作成から1日未満の新規アカウント');
+  else if (age < 7 * 24 * 60 * 60 * 1000) suspicionFlags.push('作成から7日未満のアカウント');
+  if (!member.user.avatar) suspicionFlags.push('初期アイコン');
 
-  if (initialScore > 0) {
-    const newScore = addScore(member.id, initialScore);
+  if (suspicionFlags.length > 0) {
     await sendLogEmbed(member.guild, {
-      title: '⚠️ 新規参加者初期スコア加算',
+      title: 'ℹ️ 新規参加者アラート (監視対象)',
       member,
-      description: `判定結果: +${initialScore}\n現在スコア: ${newScore}/${c.THRESHOLD}`,
-      color: 0xffa200,
+      description: `懸念事項: ${suspicionFlags.join(', ')}\n※誤検知防止のためスコア加算は行わず、監視のみ行います。`,
+      color: 0x3498db,
     });
-    await punishByScore(member, '初期スコア過多', 'system');
   }
 
   if (JOIN_LOG_CHANNEL_ID) {
@@ -1782,7 +1800,6 @@ async function handleThreadCreateSpam(entry) {
 async function handleEmojiStickerAbuse(entry) {
   const { guild, executor, action } = entry;
   if (!executor) return;
-  // 絵文字またはスタンプの作成・削除・変更のみ
   const emojiActions = new Set([
     AuditLogEvent.EmojiCreate, AuditLogEvent.EmojiDelete, AuditLogEvent.EmojiUpdate,
     AuditLogEvent.StickerCreate, AuditLogEvent.StickerDelete, AuditLogEvent.StickerUpdate,
@@ -1790,7 +1807,6 @@ async function handleEmojiStickerAbuse(entry) {
   if (!emojiActions.has(action)) return;
   const member = guild.members.cache.get(executor.id);
   if (!member || isWhitelisted(member)) return;
-  // 管理者は対象外
   if (member.permissions.has(PermissionsBitField.Flags.Administrator)) return;
   const now = Date.now();
   if (!emojiAbuseLog.has(executor.id)) emojiAbuseLog.set(executor.id, []);
@@ -1811,27 +1827,32 @@ async function handleEmojiStickerAbuse(entry) {
 }
 
 /**
- * チャンネル設定変更の連打を検知
+ * チャンネル設定変更の連打を検知（★ 改良点：安全な変更を除外）
  */
 async function handleChannelSettingAbuse(entry) {
-  const { guild, executor, action } = entry;
-  if (!executor) return;
-  if (action !== AuditLogEvent.ChannelUpdate) return;
+  const { guild, executor, action, changes } = entry;
+  if (!executor || action !== AuditLogEvent.ChannelUpdate) return;
+  
+  // 安全な変更(トピックやNSFW設定等)は無視して、危険な変更のみ対象にする
+  const isDangerousChange = changes && changes.some(c => ['permission_overwrites', 'name', 'type'].includes(c.key));
+  if (!isDangerousChange) return;
+
   const member = guild.members.cache.get(executor.id);
-  if (!member || isWhitelisted(member)) return;
-  if (member.permissions.has(PermissionsBitField.Flags.Administrator)) return;
+  if (!member || isWhitelisted(member) || member.permissions.has(PermissionsBitField.Flags.Administrator)) return;
+
   const now = Date.now();
   if (!channelSettingLog.has(executor.id)) channelSettingLog.set(executor.id, []);
   const log = channelSettingLog.get(executor.id);
   log.push(now);
   const recent = log.filter(t => now - t < CHANNEL_SETTING_ABUSE_WINDOW_MS);
   channelSettingLog.set(executor.id, recent);
+
   if (recent.length >= CHANNEL_SETTING_ABUSE_THRESHOLD) {
-    await stripAllRoles(guild, executor.id, 'チャンネル設定の連続変更');
+    await stripAllRoles(guild, executor.id, 'チャンネル設定の連続変更(権限/名前)');
     await sendLogEmbed(guild, {
-      title: '🚨 チャンネル設定変更の連打を検知',
+      title: '🚨 危険なチャンネル設定変更の連打を検知',
       member,
-      description: `${CHANNEL_SETTING_ABUSE_WINDOW_MS/1000}秒以内に ${recent.length} 回のチャンネル設定変更を検出したため権限を剥奪しました。`,
+      description: `${CHANNEL_SETTING_ABUSE_WINDOW_MS/1000}秒以内に ${recent.length} 回のチャンネル設定（権限・名前等）の変更を検出したため権限を剥奪しました。`,
       color: 0xff4757,
     });
     channelSettingLog.delete(executor.id);
@@ -1839,7 +1860,7 @@ async function handleChannelSettingAbuse(entry) {
 }
 
 // ================================================================
-//  監査ログエントリーハンドラ（拡張版）
+//  監査ログエントリーハンドラ
 // ================================================================
 async function handleAuditLogEntry(entry) {
   const { guild, executor, action, target } = entry;
@@ -1847,19 +1868,19 @@ async function handleAuditLogEntry(entry) {
   const member = guild.members.cache.get(executor.id);
   if (!member || isWhitelisted(member)) return;
 
-  // ★ NEW: 招待リンク大量生成
+  // 招待リンク大量生成
   if (action === AuditLogEvent.InviteCreate) {
     await handleInviteCreateSpam(entry);
     return;
   }
 
-  // ★ NEW: Thread大量作成
+  // Thread大量作成
   if (action === AuditLogEvent.ThreadCreate) {
     await handleThreadCreateSpam(entry);
     return;
   }
 
-  // ★ NEW: 絵文字/スタンプ変更連打
+  // 絵文字/スタンプ変更連打
   const emojiActions = new Set([
     AuditLogEvent.EmojiCreate, AuditLogEvent.EmojiDelete, AuditLogEvent.EmojiUpdate,
     AuditLogEvent.StickerCreate, AuditLogEvent.StickerDelete, AuditLogEvent.StickerUpdate,
@@ -1869,7 +1890,7 @@ async function handleAuditLogEntry(entry) {
     return;
   }
 
-  // ★ NEW: チャンネル設定変更連打
+  // チャンネル設定変更連打
   if (action === AuditLogEvent.ChannelUpdate) {
     await handleChannelSettingAbuse(entry);
   }
@@ -1886,7 +1907,7 @@ async function handleAuditLogEntry(entry) {
       await stripAllRoles(guild, executor.id, 'Webhook大量作成スパム');
       await sendLogEmbed(guild, { title: '🚨 Webhookスパム検知', member, description: `1分間に ${recent.length} 個のWebhookを作成したため権限を剥奪しました。`, color: 0xff4757 });
       try {
-        const webhooks = await guild.integrations.fetchWebhooks();
+        const webhooks = await guild.fetchWebhooks();
         const targetWebhook = webhooks.find(w => w.id === target?.id);
         if (targetWebhook) await targetWebhook.delete('荒らし対策: 自動削除');
       } catch {}
@@ -2334,15 +2355,21 @@ setInterval(() => {
     if (filtered.length === 0) adminActionHistory.delete(userId);
     else adminActionHistory.set(userId, filtered);
   }
-  // ★ NEW: anomalyLog の古いエントリをクリーンアップ
+  // anomalyLog の古いエントリをクリーンアップ
   for (const [userId, log] of anomalyLog) {
     const recent = log.filter(e => now - e.timestamp < CONFIRMED_RAID_WINDOW_MS * 10);
     if (recent.length === 0) anomalyLog.delete(userId);
     else anomalyLog.set(userId, recent);
   }
-  // ★ NEW: 参加時刻マップのクリーンアップ
+  // 参加時刻マップのクリーンアップ
   for (const [userId, joinTime] of userJoinTimeMap) {
     if (now - joinTime > 24 * 60 * 60 * 1000) userJoinTimeMap.delete(userId);
+  }
+  // Webhookログのクリーンアップ追加
+  for (const [webhookId, log] of webhookFloodLog) {
+    const recent = log.filter(t => now - t < 10000);
+    if (recent.length === 0) webhookFloodLog.delete(webhookId);
+    else webhookFloodLog.set(webhookId, recent);
   }
 }, CLEANUP_INTERVAL_MS);
 
@@ -2350,7 +2377,6 @@ setInterval(() => {
 //  エクスポート
 // ================================================================
 module.exports = {
-  // 既存エクスポート
   handleMemberJoin,
   handleMessage,
   handleReactionAdd,
@@ -2371,6 +2397,7 @@ module.exports = {
   handleMessageDelete,
   handleChannelDelete,
   handleBotSpam,
+  handleWebhookSpam, // NEW エクスポート
   pendingModActions,
   restoreRoles,
   hasManageGuildPermission,
@@ -2394,7 +2421,6 @@ module.exports = {
   handleBadNickname,
   deleteRecentMessages,
 
-  // ★ NEW エクスポート
   logAnomaly,
   executeConfirmedPunishment,
   checkTrustViolation,
