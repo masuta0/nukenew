@@ -47,8 +47,6 @@ const aiCooldowns = new Map();
 let lastGlobalCall = 0;
 const unavailableModels = new Set();
 const keyBackoffUntil = new Map();
-const keyBackoffSec = new Map();
-let keyCursor = 0;
 
 function saveHistory(userId, history) {
     if (!conversationHistory.has(userId) && conversationHistory.size >= MAX_STORED_USERS) {
@@ -167,8 +165,7 @@ async function chat(prompt, userId) {
     const contents = [...history, { role: 'user', parts: [{ text: prompt }] }];
 
     const now = Date.now();
-    const rotatedKeys = GEMINI_API_KEY.map((_, i) => GEMINI_API_KEY[(i + keyCursor) % GEMINI_API_KEY.length]);
-    const availableKeys = rotatedKeys.filter((apiKey) => {
+    const availableKeys = GEMINI_API_KEY.filter((apiKey) => {
         const blockedUntil = keyBackoffUntil.get(apiKey) || 0;
         return blockedUntil <= now;
     });
@@ -189,7 +186,6 @@ async function chat(prompt, userId) {
 
                 const aiResponse = truncateResponse(rawText);
                 keyBackoffSec.set(apiKey, 5);
-                keyCursor = (keyCursor + 1) % Math.max(GEMINI_API_KEY.length, 1);
                 setAiCooldown(userId);
 
                 const newHistory = [
@@ -212,14 +208,8 @@ async function chat(prompt, userId) {
                     break;
                 }
                 if (status === 429) {
-                    const prevSec = keyBackoffSec.get(apiKey) || 5;
-                    const nextSec = Number.isFinite(retryAfterHeader) && retryAfterHeader > 0
-                        ? retryAfterHeader
-                        : Math.min(prevSec * 2, 60);
-                    keyBackoffSec.set(apiKey, nextSec);
-                    keyBackoffUntil.set(apiKey, Date.now() + nextSec * 1000);
-                    keyCursor = (keyCursor + 1) % Math.max(GEMINI_API_KEY.length, 1);
-                    console.warn(`[AI] 429 Rate Limit. key backoff ${nextSec}s.`);
+                    keyBackoffUntil.set(apiKey, Date.now() + 5000);
+                    console.warn(`[AI] 429 Rate Limit. backoff applied for a key.`);
                     continue;
                 }
                 keyBackoffSec.set(apiKey, 5);
