@@ -185,7 +185,6 @@ async function chat(prompt, userId) {
                 if (!rawText) continue;
 
                 const aiResponse = truncateResponse(rawText);
-                keyBackoffSec.set(apiKey, 5);
                 setAiCooldown(userId);
 
                 const newHistory = [
@@ -212,7 +211,6 @@ async function chat(prompt, userId) {
                     console.warn(`[AI] 429 Rate Limit. backoff applied for a key.`);
                     continue;
                 }
-                keyBackoffSec.set(apiKey, 5);
                 console.error(`[AI Error] ${modelPath} status=${status}: ${errBody}`);
                 continue;
             }
