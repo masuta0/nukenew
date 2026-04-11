@@ -12,7 +12,7 @@ const {
   ActivityType,
   ChannelType,
 } = require('discord.js');
-
+ 
 const music = require('./utils/music');
 const { initFaceRecognition, isSimilarFace, registerFace } = require('./utils/face');
 const { registerSlashCommands, handleSlashCommand, handleButtonInteraction } = require('./commands/slash');
@@ -42,7 +42,7 @@ const {
   resetMonthlyActivity,
   updateActiveRoles,
 } = require('./utils/activity');
-
+ 
 // === anti-raid 追加ハンドラのインポート ===
 const {
   handleBotAdd,
@@ -53,7 +53,7 @@ const {
   handleRoleCreate,
   handleRoleDelete,
 } = antiRaid;
-
+ 
 // === 設定 ===
 const ACTIVE_ROLE_ID = process.env.ACTIVE_ROLE_ID;
 const TOKEN = process.env.TOKEN;
@@ -61,18 +61,18 @@ const PORT = process.env.PORT || 3000;
 const WEEKLY_CHANNEL_ID = process.env.WEEKLY_CHANNEL_ID || null;
 const FACE_LOG_CHANNEL = process.env.FACE_LOG_CHANNEL;
 const SINGLETON_RETRY_MS = Number(process.env.BOT_SINGLETON_RETRY_MS || 10_000);
-
+ 
 if (!TOKEN) {
   console.error('❌ ERROR: TOKEN が .env に設定されていません。');
   process.exit(1);
 }
-
+ 
 const APP_DATA_DIR = path.join(__dirname, 'app-data');
 if (!fs.existsSync(APP_DATA_DIR)) fs.mkdirSync(APP_DATA_DIR, { recursive: true });
-
+ 
 process.on('uncaughtException', (err) => { console.error('🚨 uncaughtException:', err); });
 process.on('unhandledRejection', (reason) => { console.error('🚨 unhandledRejection:', reason); });
-
+ 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -88,15 +88,15 @@ const client = new Client({
   ],
   partials: [Partials.Channel, Partials.Message, Partials.Reaction],
 });
-
+ 
 const app = express();
 app.get('/', (req, res) => res.send('Bot is running'));
 app.listen(PORT, () => console.log('Server listening on port ' + PORT));
-
+ 
 // 同一 messageId の二重処理を防止（誤って複数回イベントが届くケース対策）
 const processedMessageIds = new Map();
 const MESSAGE_DEDUP_TTL_MS = 5 * 60 * 1000;
-
+ 
 client.on('interactionCreate', async (interaction) => {
   try {
     if (interaction.isChatInputCommand()) {
@@ -120,11 +120,11 @@ client.on('interactionCreate', async (interaction) => {
     console.error('interactionCreate error:', err);
   }
 });
-
+ 
 // === 【修正】 高速・頑丈な ready イベント ===
 client.once('clientReady', async () => {
   console.log('🚀 Bot logged in as ' + client.user.tag);
-
+ 
   const initTasks = [
     { name: 'Face Recognition', fn: async () => { await initFaceRecognition(); } },
     { name: 'Default Face Registration', fn: async () => {
@@ -141,10 +141,10 @@ client.once('clientReady', async () => {
     { name: 'Weekly Setup', fn: async () => { setupWeekly(client, WEEKLY_CHANNEL_ID); } },
     { name: 'Slash Commands', fn: async () => { await registerSlashCommands(client); } },
   ];
-
+ 
   console.log('⏳ Initializing all systems in parallel...');
   const results = await Promise.allSettled(initTasks.map(task => task.fn()));
-
+ 
   results.forEach((result, index) => {
     const taskName = initTasks[index].name;
     if (result.status === 'fulfilled') {
@@ -152,15 +152,15 @@ client.once('clientReady', async () => {
       console.error(`❌ ${taskName} failed:`, result.reason.message || result.reason);
     }
   });
-
+ 
   console.log('✨ Bot startup sequence completed.');
-
+ 
   setInterval(() => {
     for (const guildTracker of antiRaid.similarityTracker.values()) {
       antiRaid.cleanupSimilarityTracker(guildTracker, antiRaid.SIMILARITY_HASH_EXPIRY_MS);
     }
   }, antiRaid.CLEANUP_INTERVAL_MS);
-
+ 
   const start = Date.now();
   setInterval(() => {
     const elapsed = Date.now() - start;
@@ -172,13 +172,13 @@ client.once('clientReady', async () => {
     } catch {}
   }, 5000);
 });
-
+ 
 async function handleFaceMatch(message) {
   try { await message.delete(); } catch (e) {}
   const member = message.member;
   let timeoutResult = '❌ 失敗';
   let timeoutTag = '不明';
-
+ 
   if (member && member.manageable) {
     try {
       await member.timeout(7 * 24 * 60 * 60 * 1000, 'Face image auto timeout');
@@ -186,7 +186,7 @@ async function handleFaceMatch(message) {
       timeoutTag = member.user.tag;
     } catch (err) { console.error('Timeout error:', err); }
   }
-
+ 
   try {
     if (!FACE_LOG_CHANNEL) return;
     const logChannel = await client.channels.fetch(FACE_LOG_CHANNEL);
@@ -198,7 +198,7 @@ async function handleFaceMatch(message) {
     }
   } catch (logErr) { console.error('Log error:', logErr); }
 }
-
+ 
 client.on('messageCreate', async (message) => {
   try {
     if (message.author.bot) return;
@@ -209,13 +209,13 @@ client.on('messageCreate', async (message) => {
     for (const [id, ts] of processedMessageIds.entries()) {
       if (now - ts > MESSAGE_DEDUP_TTL_MS) processedMessageIds.delete(id);
     }
-
+ 
     if (message.channel.type === ChannelType.DM) {
       await antiRaid.handleDirectMessage(message);
       return;
     }
     if (!message.guild) return;
-
+ 
     const attachments = message.attachments.values();
     for (const attachment of attachments) {
       if (attachment.contentType?.startsWith('image/')) {
@@ -225,7 +225,7 @@ client.on('messageCreate', async (message) => {
         }
       }
     }
-
+ 
     const urls = message.content.match(/https?:\/\/[^\s]+/g) || [];
     for (const url of urls) {
       if (url.match(/\.(jpg|jpeg|png|webp)$/i)) {
@@ -235,24 +235,24 @@ client.on('messageCreate', async (message) => {
         }
       }
     }
-
+ 
     await antiRaid.handleMessage(message);
     await handleWeeklyMessage(message, WEEKLY_CHANNEL_ID);
     if (message.author.id && ACTIVE_ROLE_ID) {
       await addMessage(message.guild.id, message.author.id, client, ACTIVE_ROLE_ID);
     }
-    if (message.member) await addXp(message.member);
+    if (message.member) await addXp(message.member, message.content);
     await handlePrefixMessage(client, message);
-
+ 
   } catch (err) {
     console.error('messageCreate processing error:', err);
   }
 });
-
+ 
 cron.schedule('0 0 1 * *', async () => {
   try { await resetMonthlyActivity(client); } catch (err) { console.error('Monthly reset failed:', err); }
 });
-
+ 
 client.on('messageUpdate', handleMessageUpdate);
 client.on('guildMemberAdd', handleMemberJoin);
 client.on('guildMemberRemove', onGuildMemberRemove);
@@ -269,15 +269,15 @@ client.on('channelDelete', handleChannelDelete);
 client.on('channelUpdate', handleChannelUpdate);
 client.on('roleCreate', handleRoleCreate);
 client.on('roleDelete', handleRoleDelete);
-
+ 
 let singletonHeartbeat = null;
 let singletonRetryTimer = null;
 let loginInFlight = false;
-
+ 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-
+ 
 async function tryBootWithLock(instanceId) {
   if (loginInFlight || client.isReady()) return false;
   loginInFlight = true;
@@ -286,18 +286,18 @@ async function tryBootWithLock(instanceId) {
     if (!lockResult.acquired) {
       return false;
     }
-
+ 
     if (!singletonHeartbeat) {
       singletonHeartbeat = startSingletonHeartbeat(instanceId);
     }
-
+ 
     await client.login(TOKEN);
     return true;
   } finally {
     loginInFlight = false;
   }
 }
-
+ 
 async function boot() {
   const instanceId = `${process.env.HOSTNAME || 'local'}-${process.pid}`;
   const acquired = await tryBootWithLock(instanceId);
@@ -310,14 +310,15 @@ async function boot() {
     }
   }, SINGLETON_RETRY_MS);
 }
-
+ 
 process.on('SIGTERM', async () => {
   if (singletonRetryTimer) clearInterval(singletonRetryTimer);
   if (singletonHeartbeat) clearInterval(singletonHeartbeat);
   await delay(100);
 });
-
+ 
 boot().catch((err) => {
   console.error('❌ Boot failed:', err);
   process.exit(1);
 });
+ 
