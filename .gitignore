@@ -1,0 +1,27 @@
+# GitHub .gitignore Template for Node.js and sensitive files
+
+# Node modules
+node_modules/
+
+# Dropbox Token
+dropbox_token.json
+
+# Environment Variables
+.env
+
+# Logs
+logs/
+*.log
+
+# Runtime data
+pids/
+*.pid
+*.seed
+
+# IDEs
+.idea/
+.vscode/
+
+# OS generated files
+.DS_Store
+Thumbs.db
