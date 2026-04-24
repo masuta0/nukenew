@@ -25,6 +25,7 @@ const { addXp, loadData: loadLevelData } = require('./utils/level');
 const verify = require('./utils/verify');
 const ticket = require('./utils/ticket');
 const { setupWeekly, loadWeeklyData, handleMessage: handleWeeklyMessage } = require('./utils/weeklyManager');
+const { createInvite } = require('./utils/invite');
 const antiRaid = require('./utils/anti-raid');
 const {
   handleMemberJoin,
@@ -96,6 +97,40 @@ app.listen(PORT, () => console.log('Server listening on port ' + PORT));
 // 同一 messageId の二重処理を防止（誤って複数回イベントが届くケース対策）
 const processedMessageIds = new Map();
 const MESSAGE_DEDUP_TTL_MS = 5 * 60 * 1000;
+
+// === 「依頼」チャンネル 自動招待リンク送信 ===
+// チャンネルIDごとに招待URLをキャッシュし、スパム防止のためクールダウンを設ける
+const inviteUrlCache = new Map();   // channelId -> inviteUrl
+const inviteCooldown = new Map();   // channelId -> lastSentTimestamp
+const INVITE_COOLDOWN_MS = 5 * 60 * 1000; // 5分に1回まで送信
+
+async function maybeAutoSendInvite(message) {
+  const { guild, channel } = message;
+  if (!channel?.name?.includes('依頼')) return;
+
+  const now = Date.now();
+  const lastSent = inviteCooldown.get(channel.id) || 0;
+  if (now - lastSent < INVITE_COOLDOWN_MS) return; // クールダウン中はスキップ
+
+  try {
+    // キャッシュ済みのURLがあれば再利用、なければ新規作成
+    let inviteUrl = inviteUrlCache.get(channel.id);
+    if (!inviteUrl) {
+      const result = await createInvite(guild, channel, client.user);
+      if (!result.success) {
+        console.warn('maybeAutoSendInvite: createInvite failed:', result.error);
+        return;
+      }
+      inviteUrl = result.url;
+      inviteUrlCache.set(channel.id, inviteUrl);
+    }
+
+    inviteCooldown.set(channel.id, now);
+    await channel.send(`🔗 このチャンネルへの招待リンク: ${inviteUrl}`);
+  } catch (e) {
+    console.error('maybeAutoSendInvite error:', e);
+  }
+}
  
 client.on('interactionCreate', async (interaction) => {
   try {
@@ -236,6 +271,7 @@ client.on('messageCreate', async (message) => {
       }
     }
  
+    await maybeAutoSendInvite(message);
     await antiRaid.handleMessage(message);
     await handleWeeklyMessage(message, WEEKLY_CHANNEL_ID);
     if (message.author.id && ACTIVE_ROLE_ID) {
@@ -321,4 +357,3 @@ boot().catch((err) => {
   console.error('❌ Boot failed:', err);
   process.exit(1);
 });
- 
