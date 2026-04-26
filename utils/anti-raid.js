@@ -44,9 +44,25 @@ let scores = {};
 let markedUsersStore = {};
 let serverBackup = {};
 
-function saveScores() { try { fs.writeFileSync(SCORE_PATH, JSON.stringify(scores, null, 2)); } catch {} }
-function saveMarks() { try { fs.writeFileSync(MARK_PATH, JSON.stringify(markedUsersStore, null, 2)); } catch {} }
-function saveBackup() { try { fs.writeFileSync(BACKUP_PATH, JSON.stringify(serverBackup, null, 2)); } catch {} }
+const { writeFile } = require('fs').promises;
+const pendingSaves = new Map();
+
+function debouncedSave(key, filePath, dataObj) {
+  if (pendingSaves.has(key)) clearTimeout(pendingSaves.get(key));
+  const timer = setTimeout(async () => {
+    try {
+      await writeFile(filePath, JSON.stringify(dataObj, null, 2));
+    } catch (e) {
+      console.error(`[anti-raid] Save error (${key}):`, e.message);
+    }
+    pendingSaves.delete(key);
+  }, 250);
+  pendingSaves.set(key, timer);
+}
+
+function saveScores() { debouncedSave('scores', SCORE_PATH, scores); }
+function saveMarks() { debouncedSave('marks', MARK_PATH, markedUsersStore); }
+function saveBackup() { debouncedSave('backup', BACKUP_PATH, serverBackup); }
 
 try { scores = JSON.parse(fs.readFileSync(SCORE_PATH, 'utf8')); } catch {}
 try { markedUsersStore = JSON.parse(fs.readFileSync(MARK_PATH, 'utf8')); } catch {}
@@ -373,6 +389,8 @@ function normalizeText(text) {
   if (!text) return '';
   return text
     .toLowerCase()
+    // ゼロ幅・制御文字を除去
+    .replace(/[\u200B-\u200F\uFEFF\u2060-\u2064\u180E\u0000-\u001F\u007F-\u009F]/g, '')
     .replace(/[Ａ-Ｚａ-ｚ０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0))
     .replace(/　/g, ' ')
     .normalize('NFKC')
@@ -384,7 +402,24 @@ function normalizeText(text) {
     .replace(/[９ｇｑ]/g, 'g')
     .replace(/[．。]/g, '.')
     .replace(/[／]/g, '/')
+    .replace(/：/g, ':')
+    // 連続するドット・空白を1つに正規化
     .replace(/\.+/g, '.')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * 難読化文字列除去（ゼロ幅・不可視文字・結合文字の除去）
+ */
+function stripObfuscation(text) {
+  if (!text) return '';
+  return text
+    .replace(/[\u200B-\u200F\uFEFF\u2060-\u2064\u180E\u0000-\u001F\u007F-\u009F]/g, '')
+    .replace(/[\u0300-\u036F\u1AB0-\u1AFF\u1DC0-\u1DFF\u20D0-\u20FF\uFE20-\uFE2F]/g, '')
+    .replace(/[Ａ-Ｚａ-ｚ０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0))
+    .replace(/　/g, ' ')
+    .normalize('NFKC')
     .trim();
 }
 
@@ -559,8 +594,8 @@ async function executeConfirmedPunishment(member, reason, triggerMessage = null)
     await triggerMessage.delete().catch(() => {});
   }
 
-  // 2. ★ 過去12時間のメッセージを一括削除（自動復旧）
-  const deleted = await deleteRecentMessages(member.guild, member.id, 12);
+  // 2. ★ 過去12時間のメッセージを一括削除（自動復旧・投稿チャンネル限定）
+  const deleted = await deleteRecentMessages(member.guild, member.id, 12, triggerMessage?.channel);
 
   // 3. タイムアウト → 失敗したらBAN → それも失敗なら権限剥奪
   let action = 'unknown';
@@ -829,11 +864,16 @@ async function restoreServerState(guild) {
 }
 
 // ===== 荒らし確定時: 過去12時間のメッセージを一括削除 =====
-async function deleteRecentMessages(guild, userId, hoursBack = 12) {
+async function deleteRecentMessages(guild, userId, hoursBack = 12, targetChannel = null) {
   const cutoff = Date.now() - hoursBack * 60 * 60 * 1000;
   let totalDeleted = 0;
-  const textChannels = guild.channels.cache.filter(c => c.type === ChannelType.GuildText);
-  for (const [, channel] of textChannels) {
+
+  // ★ 投稿チャンネルが特定できればそのチャンネルのみを対象に（API負荷軽減）
+  const channelsToScan = targetChannel
+    ? [targetChannel]
+    : guild.channels.cache.filter(c => c.type === ChannelType.GuildText);
+
+  for (const [, channel] of channelsToScan) {
     try {
       const messages = await channel.messages.fetch({ limit: 100 }).catch(() => null);
       if (!messages) continue;
@@ -857,10 +897,13 @@ async function deleteRecentMessages(guild, userId, hoursBack = 12) {
 }
 
 // スコアによる処罰
-async function punishByScore(member, reason, channelName) {
+async function punishByScore(member, reason, channelRef = null) {
   if (!member || isWhitelisted(member) || probationAdmins.has(member.id)) return;
   const c = currentCfg();
   const score = getScore(member.id);
+  const channelName = typeof channelRef === 'string' ? channelRef : channelRef?.name;
+  const targetChannel = (typeof channelRef === 'object' && channelRef?.type === ChannelType.GuildText) ? channelRef : null;
+
   if (score >= Math.floor(c.THRESHOLD * 0.5) && score < c.THRESHOLD) {
     const muteRole = member.guild.roles.cache.find(r => r.name.toLowerCase() === 'muted');
     if (muteRole && !member.roles.cache.has(muteRole.id)) {
@@ -872,13 +915,13 @@ async function punishByScore(member, reason, channelName) {
   if (score >= c.THRESHOLD) {
     try {
       await member.timeout(TIMEOUT_MS, reason);
-      const deleted = await deleteRecentMessages(member.guild, member.id, 12);
+      const deleted = await deleteRecentMessages(member.guild, member.id, 12, targetChannel);
       await sendLogEmbed(member.guild, { title: '🚨 Timeout 適用', member, description: `理由: ${reason}\nスコア: ${score}\n🗑️ 過去12時間のメッセージ ${deleted} 件を削除しました`, channelName });
       setScore(member.id, Math.floor(c.THRESHOLD * 0.5));
       markUser(member.id);
     } catch {
       await saveAndStripRoles(member);
-      const deleted = await deleteRecentMessages(member.guild, member.id, 12);
+      const deleted = await deleteRecentMessages(member.guild, member.id, 12, targetChannel);
       await sendLogEmbed(member.guild, { title: '🚨 権限剥奪（代替）', member, description: `Timeout失敗: ${reason}\n🗑️ 過去12時間のメッセージ ${deleted} 件を削除しました`, channelName });
       markUser(member.id);
     }
@@ -941,7 +984,8 @@ async function handleRandomStringSpam(message) {
 // ===== 変形リンク検知 =====
 function containsMaliciousLink(text) {
   const normalized = normalizeText(text);
-  if (/(?:discord\.gg|\.gg)\/[a-z0-9-]+/i.test(normalized)) {
+  // discord.gg/XXX, discord.com/invite/XXX, discordapp.com/invite/XXX に対応
+  if (/(?:discord(?:app)?\.(?:gg|com\/invite))\/[a-z0-9_-]+/i.test(normalized)) {
     for (const allowed of ALLOWED_INVITE_LINKS) {
       if (normalized.includes(allowed.toLowerCase())) return false;
     }
@@ -958,11 +1002,15 @@ async function handleObfuscatedLink(message) {
   if (!member || isWhitelisted(member)) return false;
   // 依頼チャンネルはどのサーバーリンクも許可
   if (channel?.name && channel.name.includes('依頼')) return false;
-  if (containsMaliciousLink(content)) {
+
+  // ★ 難読化を除去してから検知
+  const cleanContent = stripObfuscation(content);
+
+  if (containsMaliciousLink(cleanContent)) {
     // --- 自サーバー招待リンク判定 ---
-    // メッセージ内の discord.gg/XXXX を全て抽出し、
-    // 全て自サーバーの招待コードであれば招待ログのみ記録して処罰しない
-    const inviteCodes = [...content.matchAll(/discord(?:app)?\.(?:gg|com\/invite)\/([a-z0-9-]+)/gi)]
+    // 正規化済みテキストで招待コードを抽出
+    const normalizedContent = normalizeText(cleanContent);
+    const inviteCodes = [...normalizedContent.matchAll(/discord(?:app)?\.(?:gg|com\/invite)\/([a-z0-9_-]+)/gi)]
       .map(m => m[1]);
     if (inviteCodes.length > 0) {
       try {
@@ -1110,6 +1158,9 @@ async function handleMassMention(message) {
   if (!member || isWhitelisted(member)) return false;
 
   const mentionCount = (mentions.users?.size || 0) + (mentions.roles?.size || 0);
+  // @everyone/@here は AutoMod では拾えないためボットで対応
+  // 通常の大量メンションは AutoMod に任せる（ボット負荷軽減）
+  if (!mentions.everyone && mentionCount < MENTION_THRESHOLD * 2) return false;
   if (!mentions.everyone && mentionCount >= MENTION_THRESHOLD) {
     const scoreToAdd = mentionCount * 7;
     const s = addScore(member.id, scoreToAdd);
@@ -1519,6 +1570,85 @@ async function handleWebhookSpam(message) {
 }
 
 // ================================================================
+//  ★ AutoModerationRule 連携（Discordネイティブ・ボット負荷軽減）
+// ================================================================
+async function setupAutoModerationRules(guild) {
+  const { AutoModerationRuleTriggerType, AutoModerationRuleEventType, AutoModerationActionType } = require('discord.js');
+  const logChannel = await getOrCreateLogChannel(guild);
+
+  try {
+    const rules = await guild.autoModerationRules.fetch();
+
+    // 1. スパム検知（Discord ネイティブ）- ボット負荷軽減
+    if (!rules.some(r => r.name === 'Anti-Raid: Spam')) {
+      await guild.autoModerationRules.create({
+        name: 'Anti-Raid: Spam',
+        eventType: AutoModerationRuleEventType.MessageSend,
+        triggerType: AutoModerationRuleTriggerType.Spam,
+        triggerMetadata: {},
+        actions: [
+          { type: AutoModerationActionType.BlockMessage },
+          ...(logChannel?.id ? [{ type: AutoModerationActionType.SendAlert, metadata: { channel: logChannel.id } }] : []),
+        ],
+        enabled: true,
+      });
+    }
+
+    // 2. メンションスパム
+    if (!rules.some(r => r.name === 'Anti-Raid: Mention Spam')) {
+      await guild.autoModerationRules.create({
+        name: 'Anti-Raid: Mention Spam',
+        eventType: AutoModerationRuleEventType.MessageSend,
+        triggerType: AutoModerationRuleTriggerType.MentionSpam,
+        triggerMetadata: { mentionTotalLimit: MENTION_THRESHOLD },
+        actions: [
+          { type: AutoModerationActionType.BlockMessage },
+          ...(logChannel?.id ? [{ type: AutoModerationActionType.SendAlert, metadata: { channel: logChannel.id } }] : []),
+        ],
+        enabled: true,
+      });
+    }
+  } catch (e) {
+    console.warn('[anti-raid] AutoMod setup failed (permissions may be required):', e.message);
+  }
+}
+
+async function handleAutoModerationActionExecution(autoModerationActionExecution) {
+  const { guild, user, ruleId } = autoModerationActionExecution;
+  try {
+    const rule = await guild.autoModerationRules.fetch(ruleId).catch(() => null);
+    if (!rule) return;
+
+    const member = guild.members.cache.get(user.id);
+    if (!member || isWhitelisted(member)) return;
+
+    if (rule.triggerType === 3 /* Spam */) {
+      const c = currentCfg();
+      const s = addScore(user.id, c.MASS_SPAM);
+      logAnomaly(user.id, 'MASS_SPAM');
+      await sendLogEmbed(guild, {
+        title: '🤖 AutoMod: スパム検知（連動スコア加算）',
+        member,
+        description: `Discord AutoMod がスパムを検知しました。\n+${c.MASS_SPAM} / 現在 ${s}/${c.THRESHOLD}`,
+        color: 0xffa200,
+      });
+    } else if (rule.triggerType === 5 /* MentionSpam */) {
+      const c = currentCfg();
+      const s = addScore(user.id, c.MASS_MENTION);
+      logAnomaly(user.id, 'MASS_MENTION');
+      await sendLogEmbed(guild, {
+        title: '🤖 AutoMod: メンションスパム検知（連動スコア加算）',
+        member,
+        description: `Discord AutoMod がメンションスパムを検知しました。\n+${c.MASS_MENTION} / 現在 ${s}/${c.THRESHOLD}`,
+        color: 0xffa200,
+      });
+    }
+  } catch (e) {
+    console.error('[anti-raid] AutoMod action handler error:', e);
+  }
+}
+
+// ================================================================
 //  ★ メインのメッセージハンドラ（優先順位と構成を最適化）
 // ================================================================
 async function handleMessage(message) {
@@ -1549,8 +1679,10 @@ async function handleMessage(message) {
   // ★ 2. 信頼レイヤー（新規ユーザーチェック）
   if (await checkTrustViolation(message)) return;
 
-  // ★ 3. 大量メンションチェック
-  if (await handleMassMention(message)) return;
+  // ★ 3. 大量メンションチェック（@everyone/@here・極端なメンションのみボットで対応、通常は AutoMod に任せる）
+  if (message.mentions?.everyone || (message.mentions?.users?.size + message.mentions?.roles?.size) >= MENTION_THRESHOLD * 2) {
+    if (await handleMassMention(message)) return;
+  }
 
   // ★ 雑談チャンネル（lenient）では添付スパム・ランダム文字・短文スパムを緩和
   if (channelType !== 'lenient') {
@@ -2448,7 +2580,10 @@ module.exports = {
   handleMessageDelete,
   handleChannelDelete,
   handleBotSpam,
-  handleWebhookSpam, // NEW エクスポート
+  handleWebhookSpam,
+  setupAutoModerationRules,
+  handleAutoModerationActionExecution,
+  stripObfuscation,
   pendingModActions,
   restoreRoles,
   hasManageGuildPermission,
