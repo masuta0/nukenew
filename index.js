@@ -25,7 +25,7 @@ const { addXp, loadData: loadLevelData } = require('./utils/level');
 const verify = require('./utils/verify');
 const ticket = require('./utils/ticket');
 const { setupWeekly, loadWeeklyData, handleMessage: handleWeeklyMessage } = require('./utils/weeklyManager');
-const { createInvite } = require('./utils/invite');
+// createInvite は handleInviteRelay では不要のため import 削除済み
 const antiRaid = require('./utils/anti-raid');
 const {
   handleMemberJoin,
@@ -98,37 +98,61 @@ app.listen(PORT, () => console.log('Server listening on port ' + PORT));
 const processedMessageIds = new Map();
 const MESSAGE_DEDUP_TTL_MS = 5 * 60 * 1000;
 
-// === 「依頼」チャンネル 自動招待リンク送信 ===
-// チャンネルIDごとに招待URLをキャッシュし、スパム防止のためクールダウンを設ける
-const inviteUrlCache = new Map();   // channelId -> inviteUrl
-const inviteCooldown = new Map();   // channelId -> lastSentTimestamp
-const INVITE_COOLDOWN_MS = 5 * 60 * 1000; // 5分に1回まで送信
+// === 「依頼」チャンネル 招待リンク中継 ===
+// ユーザーが Discord 招待リンクを貼ったとき:
+//   1. 元メッセージを即削除（送信者を第三者に見せない）
+//   2. bot がそのリンクだけを再送信
+//   3. 「招待ログ」チャンネルに送信者・リンク・時刻を記録
+const DISCORD_INVITE_REGEX = /https?:\/\/(?:discord\.gg|discord\.com\/invite)\/([A-Za-z0-9-]+)/g;
 
-async function maybeAutoSendInvite(message) {
-  const { guild, channel } = message;
+async function handleInviteRelay(message) {
+  const { guild, channel, author } = message;
+
+  // 「依頼」を含むチャンネルのみ対象
   if (!channel?.name?.includes('依頼')) return;
 
-  const now = Date.now();
-  const lastSent = inviteCooldown.get(channel.id) || 0;
-  if (now - lastSent < INVITE_COOLDOWN_MS) return; // クールダウン中はスキップ
+  // メッセージ内の Discord 招待リンクを全抽出
+  const matches = [...message.content.matchAll(DISCORD_INVITE_REGEX)];
+  if (matches.length === 0) return;
 
+  // 招待リンクの URL 一覧（重複除去）
+  const inviteUrls = [...new Set(matches.map(m => m[0]))];
+
+  // 1. 元メッセージを即削除（失敗しても続行）
+  try { await message.delete(); } catch (e) {
+    console.warn('handleInviteRelay: delete failed:', e?.message || e);
+  }
+
+  // 2. bot がリンクのみ再送信
   try {
-    // キャッシュ済みのURLがあれば再利用、なければ新規作成
-    let inviteUrl = inviteUrlCache.get(channel.id);
-    if (!inviteUrl) {
-      const result = await createInvite(guild, channel, client.user);
-      if (!result.success) {
-        console.warn('maybeAutoSendInvite: createInvite failed:', result.error);
-        return;
-      }
-      inviteUrl = result.url;
-      inviteUrlCache.set(channel.id, inviteUrl);
-    }
-
-    inviteCooldown.set(channel.id, now);
-    await channel.send(`🔗 このチャンネルへの招待リンク: ${inviteUrl}`);
+    await channel.send(inviteUrls.join('\n'));
   } catch (e) {
-    console.error('maybeAutoSendInvite error:', e);
+    console.error('handleInviteRelay: resend failed:', e);
+    return;
+  }
+
+  // 3. 「招待ログ」チャンネルに記録（送信者情報はここだけ）
+  try {
+    const logChannel = guild.channels.cache.find(c =>
+      c.name?.includes('招待ログ') && c.isTextBased()
+    );
+    if (!logChannel) return;
+
+    const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+    const logLines = [
+      `📋 **招待リンク中継ログ**`,
+      `👤 送信者: ${author.tag} (ID: \`${author.id}\`)`,
+      `📌 チャンネル: ${channel.name} (<#${channel.id}>)`,
+      `🕐 時刻: ${timestamp}`,
+      `🔗 リンク:\n${inviteUrls.map(u => `  ${u}`).join('\n')}`,
+    ].join('\n');
+
+    await logChannel.send({
+      content: logLines,
+      allowedMentions: { parse: [] }, // メンションを発生させない
+    });
+  } catch (e) {
+    console.error('handleInviteRelay: log failed:', e);
   }
 }
  
@@ -271,7 +295,7 @@ client.on('messageCreate', async (message) => {
       }
     }
  
-    await maybeAutoSendInvite(message);
+    await handleInviteRelay(message);
     await antiRaid.handleMessage(message);
     await handleWeeklyMessage(message, WEEKLY_CHANNEL_ID);
     if (message.author.id && ACTIVE_ROLE_ID) {
